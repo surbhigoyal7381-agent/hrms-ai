@@ -1,0 +1,90 @@
+name: CI
+
+on: [push, pull_request]
+
+env:
+  # Telemetry kill list — docs/06-technology-decisions.md.
+  # These belong in CI and the Dockerfile, not on a developer's laptop.
+  NEXT_TELEMETRY_DISABLED: '1'
+  K6_NO_USAGE_REPORT: '1'
+  DO_NOT_TRACK: '1'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install -g pnpm@9
+      - run: pnpm install --frozen-lockfile
+      - name: Tests (unit + integration, incl. cross-tenant RLS isolation)
+        run: pnpm -r test
+        env: { PGHOST: localhost, PGPORT: '5433' }
+
+  ai-gateway-boundary:
+    # All model access goes through packages/ai. Nothing else may call a model
+    # API directly (docs/06-technology-decisions.md §The AI decision).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No model SDK outside packages/ai
+        run: |
+          if grep -rInE "(openai|anthropic|@google/generative-ai|api\.openai\.com|api\.anthropic\.com)" \
+               --include='*.ts' --include='*.tsx' --include='*.js' \
+               apps packages --exclude-dir=node_modules \
+             | grep -v '^packages/ai/'; then
+            echo "::error::Model API accessed outside packages/ai. All AI calls must go through the gateway."
+            exit 1
+          fi
+          echo "OK: no model access outside the gateway."
+
+  classification-coverage:
+    # COMP-34: a personal-data column with no data_classification row is a
+    # compliance gap, so it fails the build rather than waiting for an audit.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_HOST_AUTH_METHOD: trust }
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every personal-data column is classified
+        run: |
+          psql -h localhost -p 5433 -U postgres -c 'CREATE DATABASE hrms'
+          psql -h localhost -p 5433 -U postgres -d hrms -v ON_ERROR_STOP=1 \
+            -f packages/db/migrations/0001_core_hr_foundation.sql
+          # Exclusions are table.column, never a bare column name: a bare
+          # exclusion silently protects nothing in every future table.
+          MISSING=$(psql -h localhost -p 5433 -U postgres -d hrms \
+            -c "SET hrms.nonpersonal = '$(cat packages/db/nonpersonal-columns.txt | tr '\n' ',')'" -tAc "
+            SELECT c.table_name || '.' || c.column_name
+              FROM information_schema.columns c
+              LEFT JOIN data_classification dc
+                ON dc.table_name = c.table_name AND dc.column_name = c.column_name
+             WHERE c.table_schema = 'public'
+               AND EXISTS (SELECT 1 FROM information_schema.columns tc
+                            WHERE tc.table_name = c.table_name
+                              AND tc.column_name = 'tenant_id')
+               AND (c.table_name || '.' || c.column_name) NOT IN (
+                 SELECT unnest(string_to_array(current_setting('hrms.nonpersonal', true), ',')))
+               AND dc.column_name IS NULL")
+          if [ -n "$MISSING" ]; then
+            echo "::error::Unclassified personal-data columns: $MISSING"
+            exit 1
+          fi
+          echo "OK: all personal-data columns classified."

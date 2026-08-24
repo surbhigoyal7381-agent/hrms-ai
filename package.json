@@ -1,0 +1,11 @@
+{
+  "name": "hrms-ai",
+  "private": true,
+  "packageManager": "pnpm@9.0.0",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "pnpm -r test",
+    "db:migrate": "node packages/db/src/migrate.mjs",
+    "db:reset": "node packages/db/src/migrate.mjs --reset"
+  }
+}
