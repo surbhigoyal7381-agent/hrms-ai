@@ -72,8 +72,13 @@ jobs:
             -f packages/db/migrations/0001_core_hr_foundation.sql
           # Exclusions are table.column, never a bare column name: a bare
           # exclusion silently protects nothing in every future table.
-          MISSING=$(psql -h localhost -p 5433 -U postgres -d hrms \
-            -c "SET hrms.nonpersonal = '$(cat packages/db/nonpersonal-columns.txt | tr '\n' ',')'" -tAc "
+          # They are applied here, not inside the query: psql -c does not
+          # interpolate :'vars', and a second -c prints its command tag
+          # ("SET") into the output, which was then read back as a bogus
+          # unclassified column. `grep .` drops blank lines -- one blank line
+          # in a -f pattern file matches everything and would silently
+          # disable this check.
+          MISSING=$(psql -h localhost -p 5433 -U postgres -d hrms -tAqc "
             SELECT c.table_name || '.' || c.column_name
               FROM information_schema.columns c
               LEFT JOIN data_classification dc
@@ -82,9 +87,8 @@ jobs:
                AND EXISTS (SELECT 1 FROM information_schema.columns tc
                             WHERE tc.table_name = c.table_name
                               AND tc.column_name = 'tenant_id')
-               AND (c.table_name || '.' || c.column_name) NOT IN (
-                 SELECT unnest(string_to_array(current_setting('hrms.nonpersonal', true), ',')))
-               AND dc.column_name IS NULL")
+               AND dc.column_name IS NULL" \
+            | grep -vxFf <(grep . packages/db/nonpersonal-columns.txt) || true)
           if [ -n "$MISSING" ]; then
             echo "::error::Unclassified personal-data columns: $MISSING"
             exit 1
