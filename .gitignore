@@ -4,3 +4,6 @@ dist/
 .env
 .env.local
 *.log
+# The workspace is pnpm (see pnpm-workspace.yaml). npm lockfiles from
+# per-package installs would conflict with it.
+package-lock.json

@@ -27,7 +27,9 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: npm install -g pnpm@9
-      - run: pnpm install --frozen-lockfile
+      # No pnpm-lock.yaml is committed yet. Run `pnpm install` once at the repo
+      # root and commit pnpm-lock.yaml, then restore --frozen-lockfile here.
+      - run: pnpm install
       - name: Tests (unit + integration, incl. cross-tenant RLS isolation)
         run: pnpm -r test
         env: { PGHOST: localhost, PGPORT: '5433' }
