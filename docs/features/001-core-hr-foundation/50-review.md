@@ -3,7 +3,7 @@ feature: 001-core-hr-foundation
 artefact: review
 author: hrms-techno-functional-reviewer
 date: 2026-08-24
-status: FAIL (round 2) — escalated to a human; round-2 findings since fixed
+status: CLOSED — human verdict PASS WITH FIXES, 2026-08-25 (merge 6477832)
 inputs: [10-opportunity.md, 20-requirements.md, 30-design-notes.md, 40-test-plan.md, 99-decision-log.md, packages/db, packages/core, packages/ai]
 ---
 
@@ -11,8 +11,15 @@ inputs: [10-opportunity.md, 20-requirements.md, 30-design-notes.md, 40-test-plan
 
 Two review rounds ran against this feature. Both returned FAIL, which triggered the
 escalation rule in `docs/00-team-charter.md`. Everything the reviewer found was
-real; the round-2 findings have since been fixed with regression tests, and a
-human decides whether round 3 proceeds.
+real; the round-2 findings were fixed with regression tests.
+
+> **Escalation closed 2026-08-25 — verdict PASS WITH FIXES, decided by a human.**
+> Round 3 did not run. Merged to `main` in `6477832`, with CI green on all three
+> jobs and 88 tests passing (71 in `packages/core`, 17 in `packages/ai`).
+> The debt accepted with that verdict — the five open MINORs below, the
+> not-implemented list, the `app.tenant_id` GUC risk, two open questions and one
+> `[LAW — VERIFY]` — is itemised in `99-decision-log.md` under the same date.
+> **Everything else in this document stands as the reviewer wrote it.**
 
 ## Round 1 — FAIL, four blockers
 

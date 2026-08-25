@@ -63,3 +63,18 @@ Round 2 revoked DELETE and left UPDATE open, so the system-time chain that the Q
 ### 2026-08-24 — ESCALATED TO A HUMAN
 Two consecutive FAIL verdicts on this feature triggered the escalation rule in `docs/00-team-charter.md`. The reviewer's own note: *"the two-FAIL rule has fired on a ~30-line defect in a code path nothing can currently call — fixing the blocker and re-verifying is a day's work, not a reset."*
 Round-2 blocker and all three majors are now fixed with regression tests. **A human decides whether round 3 proceeds.** Open minors are listed in `50-review.md`.
+
+### 2026-08-25 — ESCALATION CLOSED: PASS WITH FIXES
+**Decided by:** a human, resolving the escalation entry above. Round 3 did not run; the human took the decision directly.
+**Verdict:** **PASS WITH FIXES.** Merged to `main` in **6477832** (`--no-ff`, so the branch history is preserved).
+**Evidence at the time of the decision:** every round-1 and round-2 blocker and major fixed with regression tests; CI green on all three jobs (`test`, `ai-gateway-boundary`, `classification-coverage`); 88 tests pass — 71 in `packages/core`, 17 in `packages/ai`. The RLS suite connects as `hrms_app`, a `NOBYPASSRLS` non-owner role, so it proves something.
+
+**Accepted debt — shipped knowingly, not overlooked:**
+
+1. **Five open MINORs** (listed in `50-review.md`): `findReportingCycle` runs before the `FOR UPDATE` lock, so two concurrent manager swaps could both pass; `employmentAsKnownAt` returns `rows[0]` where `employmentAsOf` throws on >1; `SELF_CORRECTABLE` is an allowlist with no enforcing function; ISO dates in user-facing messages instead of locale-formatted (`I18N-02`); `withTenant`'s `ROLLBACK` can mask the original error.
+2. **Not implemented**: REQ-002, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009, change notifications (no queue), the retention purge job, employment state-machine transitions (no job runner), skip-level permissions, and the `apps/web` transport layer.
+3. **The `app.tenant_id` GUC risk** stays open — it is an ordinary GUC the app role can set freely, so any SQL-injection defect anywhere escalates to a full cross-tenant breach. **Owner: hrms-fullstack-engineer.**
+4. **Two open questions** carried forward: Q-07 → legal (does any statutory filing require the historical legal name at the time of the transaction?) and Q-06 → BA (what `REQ-003`'s 409 response must contain).
+5. **`[LAW — VERIFY]`** that pseudonymising `decided_by_name` and `actor_id` rather than deleting them satisfies erasure in each market.
+
+**What this verdict does not mean.** A green build covers the paths that exist. Core HR is not done, and the not-implemented list above is the proof. `50-review.md`'s own warning stands: do not read the passing tests as "Core HR works."
