@@ -1,30 +1,7 @@
-# Applying this work to surbhigoyal7381-agent/hrms-ai
+# Core HR foundation — running it locally
 
-Two ways. **The bundle keeps the commits and their messages** — prefer it.
-
-## Option A — git bundle (recommended)
-
-```bash
-cd /path/to/hrms-ai
-git bundle verify /path/to/core-hr-foundation.bundle
-git fetch /path/to/core-hr-foundation.bundle feat/core-hr-foundation:feat/core-hr-foundation
-git switch feat/core-hr-foundation
-```
-
-Then review and merge, or open a PR:
-
-```bash
-git push -u origin feat/core-hr-foundation
-gh pr create --fill
-```
-
-## Option B — patch file
-
-```bash
-cd /path/to/hrms-ai
-git switch -c feat/core-hr-foundation
-git am /path/to/core-hr-foundation.patch
-```
+This branch is already applied and pushed. What follows is how to stand it up
+and prove it works.
 
 ## Running it
 
@@ -60,4 +37,6 @@ superusers bypass row-level security entirely.
 
 - `docs/features/001-core-hr-foundation/50-review.md` — what two review rounds found
 - `docs/features/001-core-hr-foundation/99-decision-log.md` — why the schema is shaped this way
-- `docs/06-technology-decisions.md` §Telemetry kill list — set these in your Dockerfile
+- `docs/06-technology-decisions.md` §Telemetry kill list — already set in
+  `.github/workflows/ci.yml` and `.env.example`. There is no Dockerfile yet;
+  set them there too when a deployable app exists.

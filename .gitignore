@@ -7,3 +7,7 @@ dist/
 # The workspace is pnpm (see pnpm-workspace.yaml). npm lockfiles from
 # per-package installs would conflict with it.
 package-lock.json
+
+# Handoff artefacts — the branch is on the remote; these are redundant copies.
+core-hr-foundation.bundle
+core-hr-foundation.patch
