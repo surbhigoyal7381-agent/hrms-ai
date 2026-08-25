@@ -79,6 +79,8 @@ Working differentiators (**treat these as hypotheses to validate, not settled tr
 ## 6. Non-functional requirements and compliance
 
 - **NFRs:** `docs/03-nfr-catalog.md` — `SEC-*`, `PRIV-*`, `PERF-*`, `SCALE-*`, `REL-*`, `OBS-*`, `A11Y-*`, `I18N-*`, `AI-*`, `COST-*`, `UX-*`
+- **Fairness & transparency:** `docs/07-fairness-and-transparency.md` — binding charter: visibility defaults, the Transparency Ledger, the fairness review gate, and the refuse-to-build list
+- **Technology:** `docs/06-technology-decisions.md` — the locked stack, licence risks, telemetry kill list
 - **Compliance:** `docs/05-compliance-catalog.md` — `COMP-*`, covering India's DPDP Act 2023 + DPDP Rules 2025, GDPR/UK GDPR, the EU AI Act's high-risk employment category, US state AI-hiring laws, CCPA/CPRA, and the standards enterprise buyers ask for (ISO/IEC 27001:2022, ISO/IEC 27701:2025, ISO/IEC 42001:2023, SOC 2, NIST CSF 2.0 / AI RMF).
 
 Every requirement, design note, test plan and review cites these by ID.
@@ -93,31 +95,58 @@ Every requirement, design note, test plan and review cites these by ID.
 4. **Anything reaching a payslip, a rejection, a termination, or a regulator gets human legal sign-off before release.**
 5. **Build for the strictest applicable rule**, then relax per tenant by configuration. Retrofitting strictness costs more than starting there.
 
-## 7. Technology
+## 7. Technology — DECIDED
 
-> **STATUS: PROPOSED, NOT DECIDED.** This section is a starting point written by an assistant, not a validated architecture. The Full-Stack agent must confirm each line against current documentation before any of it is used, and the PM must approve the one-way doors. Replace this notice once the team has signed off.
+Full rationale, licence table, rejected options and telemetry kill list: **`docs/06-technology-decisions.md`**. Read it before adding any dependency.
 
-**Proposed default stack** — chosen for boring, well-documented, widely-hired-for technology:
+**Deployment:** multi-tenant SaaS, EU + India regions.
 
-- Language: TypeScript end to end
-- Frontend: React + Next.js (App Router), Tailwind CSS, a headless component library
-- API: REST + OpenAPI as the contract; typed client generated from it
-- Backend: Node (Next route handlers for BFF; a separate service only when a real boundary appears)
-- Database: PostgreSQL, with a migration tool checked into the repo
-- Cache/queue: Redis; a durable job runner for long-running work (payroll runs, imports)
-- Files: S3-compatible object storage, signed URLs only
-- Auth: OIDC/SAML SSO + SCIM provisioning; sessions server-side
-- Observability: structured JSON logs (PII-redacted), traces, metrics
-- CI: lint → typecheck → unit → integration → e2e → security scan, on every PR
+**Selection criteria:** genuinely open source with a low-risk licence · popular and maintained enough to hire for · low data-privacy risk (no phone-home by default, no forced third-party egress) · boring.
 
-**One-way doors — do not decide these without the PM and Full-Stack agent both signing off in `docs/99-decision-log.md`:**
+| Layer | Choice |
+|---|---|
+| Language / runtime | TypeScript, Node 22 LTS |
+| Monorepo | pnpm workspaces + Turborepo |
+| Web | Next.js (App Router) + Tailwind + Radix + shadcn/ui — all MIT |
+| Database | **PostgreSQL**, with `FORCE ROW LEVEL SECURITY` on every tenant-scoped table |
+| ORM | **Drizzle** — SQL-first, first-class RLS, no proprietary engine |
+| Jobs | **pg-boss** on the same Postgres — transactional enqueue, no Redis |
+| Cache | none in v1; **Valkey** (BSD-3) if ever needed, never Redis 8 |
+| Identity | **Keycloak** (Apache-2.0, CNCF) — SCIM is experimental, we build our own |
+| Authorization | Postgres RLS for tenancy + policy functions in `packages/core` |
+| Observability | **OpenTelemetry** + Prometheus (both Apache-2.0) |
+| Product analytics | **first-party event table in Postgres** — no third-party analytics SDK in the employee app |
+| Feature flags | Postgres-backed behind an OpenFeature interface |
+| AI | hosted API behind our own gateway in `packages/ai` — see below |
 
-1. **Multi-tenancy model** (shared schema with tenant_id / schema-per-tenant / database-per-tenant) — this decides your isolation story, your compliance story, and your migration pain forever.
-2. **Time and timezone model** — store UTC, resolve to the employee's assigned work calendar; attendance and payroll periods are business dates, not timestamps.
+**Rejected, with reasons in the decisions doc:** MinIO (maintenance mode) · Redis 8 (relicensed) · Prisma (CLI telemetry, non-self-hostable Accelerate, weaker RLS) · Zitadel (AGPL) · PostHog self-hosted (officially hobbyist-only, phones home) · Unleash 8.x (silently relicensed to AGPL, June 2026) · SigNoz (proprietary `ee/`) · Grafana embedded in customer UI (AGPL §13).
+
+### Two traps every engineer must know
+
+1. **Postgres RLS is bypassed by the table owner** unless you use `FORCE ROW LEVEL SECURITY`. This is the most common multi-tenant leak in exactly this architecture. There is a cross-tenant test; it must never be deleted.
+2. **Drizzle Studio serves its UI from a Drizzle-controlled domain** and its own docs say it is for local development only. **Never point it at real employee data.**
+
+### The AI boundary
+
+We chose a **hosted model API under a DPA with no-training terms**. That is a deliberate trade of privacy risk for capability, and it comes with obligations that are the design, not a checklist:
+
+- **All model access goes through one gateway** in `packages/ai`. Nothing else may call a model API directly; CI fails if it does.
+- The gateway enforces a **classification gate** (identity/financial/health/biometric fields are refused or redacted), **minimisation**, **per-tenant opt-in**, a **per-tenant kill switch**, **full call logging**, and **injection defence**.
+- The adapter is **provider-agnostic by design** so moving to self-hosted open-weight inference is a config change, not a rewrite. Cheap now, expensive later.
+- Every call is a cross-border transfer and a sub-processor relationship. A strictly region-pinned tenant may not be able to use AI features at all — verify per region, never assume.
+
+### Telemetry
+
+Several dependencies phone home by default. The disable flags live in `docs/06-technology-decisions.md` §Telemetry kill list and belong in the **Dockerfile and CI**, not on a laptop. A dependency that phones home from inside an HRMS deployment is a review finding, not a nuisance.
+
+### One-way doors — do not decide without the PM and Full-Stack agent both signing off in `docs/99-decision-log.md`
+
+1. **Multi-tenancy model** — decided: shared schema with `tenant_id` + `FORCE ROW LEVEL SECURITY`. Revisit only for a customer contractually requiring physical isolation.
+2. **Time and timezone model** — store UTC; resolve against the employee's work calendar. Attendance and payroll periods are **business dates**, not timestamps.
 3. **Money representation** — integer minor units + explicit currency. Never floats. Never.
-4. **Effective-dated history** — every employee attribute that affects pay or reporting must be effective-dated from day one. Retrofitting this is a rewrite.
-5. **Data residency** — whether a tenant's data can be pinned to a region, and enforced rather than merely documented (`COMP-40`, `COMP-43`).
-6. **Data classification metadata on every personal-data field** — this is what generates your record of processing, your retention clocks, and your field-level permissions. Added later, it is an archaeology project across every table you ever wrote (`COMP-01`, `COMP-34`).
+4. **Effective-dated history** — every employee attribute affecting pay or reporting is effective-dated from day one. Retrofitting this is a rewrite.
+5. **Data residency** — enforced, not documented (`COMP-40`, `COMP-43`).
+6. **Data classification metadata on every personal-data field** — this generates the record of processing, retention clocks, field permissions, export and erasure. Added later, it is archaeology across every table you ever wrote (`COMP-01`, `COMP-34`).
 
 ## 8. House rules for every agent
 
@@ -127,3 +156,4 @@ Every requirement, design note, test plan and review cites these by ID.
 - **No over-engineering.** Apply the test in `docs/02-definition-of-done.md` §Simplicity. If you cannot name what the complexity buys, remove it.
 - **Stay in your lane.** Each agent owns specific artefacts. Do not write another agent's artefact; raise a question in the decision log instead.
 - **Handoffs are files, not conversations.** See `docs/01-handoff-protocol.md`.
+- **Fair by design, transparent by default.** `docs/07-fairness-and-transparency.md` is binding, not aspirational. It defines what we show and to whom, the Transparency Ledger, and — most importantly — **the list of things we refuse to build**. A violation is a BLOCKER at review. If you are about to build something an employee would be surprised to learn is happening, stop and read Part 3.
