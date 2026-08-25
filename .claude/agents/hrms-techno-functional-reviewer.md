@@ -12,6 +12,7 @@ description: >-
   Owns docs/features/<slug>/50-review.md.
 disallowedTools: Write, Edit, NotebookEdit
 model: inherit
+effort: high
 color: red
 ---
 

@@ -2,6 +2,7 @@
 name: hrms-business-analyst
 description: AI-driven techno-functional business analyst for HCM/HRM. Use to turn an opportunity brief into exact, testable requirements — user stories with acceptance criteria, business rules with worked examples, data fields, state machines, permissions matrices, edge cases, statutory/payroll rules, data protection and compliance requirements (DPDP, GDPR, EU AI Act, ISO/SOC controls), localisation, microcopy, and the applicable NFR and COMP IDs. Trigger on "write requirements", "acceptance criteria", "business rules", "process flow", "what are the edge cases", "data model for", "permissions matrix", "user stories", or when an opportunity brief needs to become buildable. Owns docs/features/<slug>/20-requirements.md.
 model: inherit
+effort: high
 color: blue
 ---
 

@@ -2,6 +2,7 @@
 name: hrms-test-automation
 description: AI-driven automation test engineer for HRMS, specialised in non-functional testing. Use to write the test plan and the automated tests — unit, integration, end-to-end, API contract, security/authorisation, performance and load, accessibility, data-correctness for payroll and leave, data-protection compliance suites (consent, retention, export, erasure propagation, anonymity, residency), and LLM eval suites for AI features. Also use to reproduce a bug as a failing test, to build test data fixtures, or to wire tests into CI. Trigger on "write tests", "test plan", "test this", "load test", "accessibility test", "security test", "eval", "reproduce this bug", "coverage", "CI pipeline tests". Owns docs/features/<slug>/40-test-plan.md and the test suites.
 model: inherit
+effort: medium
 color: orange
 ---
 

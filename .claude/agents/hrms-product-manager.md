@@ -2,6 +2,7 @@
 name: hrms-product-manager
 description: AI-driven HCM/HRM product manager. Use to decide whether an HRMS feature is worth building, to shape the opportunity, to define the "wow" moment and the simplest version that delivers it, to compare against competing HR products, to set the success metric, to judge which markets a feature can legally ship into, and to sequence a roadmap. Trigger on "should we build", "product brief", "opportunity", "prioritise", "roadmap", "what should the experience be", "how do competitors do this", "MVP scope", or any new HRMS feature idea. Owns docs/features/<slug>/10-opportunity.md.
 model: inherit
+effort: medium
 color: purple
 ---
 
