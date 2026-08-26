@@ -49,7 +49,7 @@ requirements are written against what is there, not against what feature 001 spe
 | `emergency_contact` and `profile_photo` in `SELF_CORRECTABLE` | The constant in `employment.ts` lists **four** fields. The columns `person.emergency_contact` and `person.profile_photo_url` exist. RULE-003 sets the list at six |
 | Any function that enforces `SELF_CORRECTABLE` | Open MINOR from 001. REQ-009 closes it |
 | Any notification queue | REQ-015's notice is the only notification in this slice, and it must degrade safely (`REL-04`) |
-| Any login, session, or post-exit access path | REQ-022 — and this is the gap I am most worried about |
+| Any login, session, or post-exit access path | REQ-022. The 90-day post-exit window is now **in scope** (Q-09 resolved, 2026-08-26). It is a time-boxed exception to exit revocation, not a change to it |
 
 ## Scope
 
@@ -58,10 +58,14 @@ with reason and decider · future-dated changes labelled · who has looked at th
 system reads separated · the standing confidential-access panel · self-correction of six
 allowlisted fields, enforced server-side · Download my data · the DPO / grievance contact · the
 tenant setting, its flip log and its employee notice · a `sensitive_read` audit entry on every read
-path, whether the setting is on or off · the events.
+path, whether the setting is on or off · **the 90-day post-exit sign-in window reaching the
+carve-out screen only** · the events.
 
 **Out, deliberately.** Directory and org chart · any HR-facing screen · correction *requests* for
-locked fields · change notifications beyond REQ-015's setting notice · document vault · manager
+locked fields · **the durable tracked request route for ex-employees — unauthenticated,
+identity-verified, with the `COMP-24` clock (feature 003; until it ships the durable route is the
+published DPO inbox, which `COMP-20` explicitly rules out — accepted debt, owner PM, review
+2026-11-30)** · change notifications beyond REQ-015's setting notice · document vault · manager
 view of a team · erasure request and consent withdrawal in-product · bulk import · native mobile
 app · **any AI** (recorded deliberately, not by omission: `COMP-70`–`COMP-79` and `AI-*` do not
 apply to this feature — no model call is made anywhere in it).
@@ -978,44 +982,215 @@ design question, not a requirement change → Q-13, blocking this requirement on
 
 ---
 
-### REQ-022 — Aisha has left, and still has a right of access
+### REQ-022 — Aisha has left, and can still get a copy of her data for 90 days
 
 **As** Aisha, three weeks after my last day
-**I want** to get a copy of my data
+**I want** to sign in and download my data
 **So that** the right the carve-out promises is a right I can actually use
 
-**This is the gap I am most worried about, and the brief did not anticipate it.** The whole point
-of the Q-06 carve-out is that a default-off tenant still serves `COMP-20` and `COMP-21`. Feature
-001 revokes access at exit (`SEC-09`, the `notice → exited` transition emits an access-revocation
-event). An ex-employee therefore cannot log in — so the carve-out serves everyone **except the
-population most likely to exercise the right.**
+**Q-09 resolved 2026-08-26** (`99-decision-log.md`). Sign-in keeps working for **90 days after the
+exit date**, reaching the **carve-out screen only**. That is convenience, not the obligation — the
+durable tracked request route is feature 003. The window sits **outside the tenant switch**, like
+the rest of the carve-out: an ex-employee of a tenant that never turned the record view on still
+reaches the export.
+
+`post_exit_window_days = 90` is **one product-wide value, not a per-tenant setting.** It becomes
+configurable when a customer's security posture genuinely cannot accept 90 days — the
+second-customer rule.
+
+#### What she can reach, and what she cannot
 
 ```
-GIVEN Aisha's employment status became exited on 2026-11-30
- WHEN she attempts to sign in on 2026-12-21
- THEN the current design gives her no route at all
+GIVEN Aisha's exit_date is 2026-11-30 and today is 2027-01-15 (day 46)
+ WHEN she signs in
+ THEN the session is created and is marked as a POST-EXIT session
+  AND she reaches exactly three things:
+        1. the minimal own-fields view of RULE-002
+        2. Download my data
+        3. the DPO / grievance contact
+  AND she sees the string postexit.notice, which tells her the date her sign-in
+      ends and that her right to a copy does not end with it
 
-REQUIRED, and one of these must be chosen before release:
- (a) a time-boxed post-exit access window, during which she can sign in to the
-     carve-out screen ONLY — minimal view, export, DPO contact — with the
-     window length a per-tenant, per-market parameter and the default stated;
-     every such sign-in audited as a sensitive read; or
- (b) an unauthenticated, published DPO route that a person can reach without a
-     login, with the response clock of COMP-24 tracked
+GIVEN a POST-EXIT session
+ WHEN it calls GET /me/history, GET /me/access-log, or PATCH /me/details
+ THEN 403 with code POST_EXIT_SESSION, and NO employee data is returned
+  AND this holds even when the tenant setting is ON — the window is narrower
+      than the switch, never wider (SEC-09)
 
-GIVEN either route is chosen
- THEN the screen Aisha saw on her last day tells her, in advance, which one it
-     is and how long she has (UX-04 — a right with no next step is not a right)
-  AND the choice is recorded as a tenant parameter with a statutory reference,
-      not hard-coded
+GIVEN a POST-EXIT session in a tenant whose setting is OFF
+ WHEN she calls GET /me/export
+ THEN 200 — the window sits outside the switch, exactly as the rest of the
+      carve-out does (RULE-002)
+
+GIVEN Aisha's status is `notice` and her exit_date is 2026-11-30
+ WHEN she opens My record on any day before she leaves
+ THEN she sees postexit.exitnotice, naming 2027-02-28 as the date her sign-in
+      ends and stating that her right to a copy does not end with it
+  AND it is rendered ON THE SCREEN, not sent as a message — there is no
+      notification queue in this slice, and a notice that depends on one would
+      be a notice that never arrives (UX-04)
+  AND it carries no countdown, no remaining-days number, and no urgency framing
+      of any kind (charter Part 3; see the microcopy section)
+
+GIVEN a POST-EXIT session
+ WHEN it calls ANY endpoint outside the three above — including any endpoint
+      added by a later feature
+ THEN 403. The allowed set is an allowlist checked server-side, the same shape
+      as RULE-003's field allowlist. A later feature that adds an endpoint
+      reachable from a post-exit session is a BLOCKER, not a finding
 ```
 
-NFRs: `SEC-09`, `SEC-10`, `COMP-06`, `COMP-20`, `COMP-21`, `COMP-24`, `UX-04`.
-`[LAW — VERIFY: the response clock for an access request, and whether an ex-employee's request may
-be served through a contact route rather than a self-service screen — DPDP Act 2023 / DPDP Rules
-2025 and GDPR Art. 15 for the EU. Unverified, as of 2026-08-26.]`
-**→ Q-09, BLOCKING. It decides whether the carve-out delivers what the decision log says it
-delivers.**
+#### Day 89 versus day 91 — the exact boundary
+
+The window is counted in **whole days from the exit date, in the employee's work-calendar
+timezone**, and is inclusive of day 90.
+
+```
+GIVEN exit_date = 2026-11-30 and post_exit_window_days = 90
+ THEN the last day the window is open is 2027-02-28
+      (2026-11-30 + 90 days; December 31 + January 31 + February 28 = 90)
+
+GIVEN it is 2027-02-27 (day 89), 23:58 IST
+ WHEN Aisha signs in and calls GET /me/export
+ THEN 200, the export runs, and post_exit_export_requested{days_since_exit:89}
+      is emitted
+
+GIVEN it is 2027-02-28 (day 90), 23:58 IST
+ THEN the window is still OPEN — day 90 is inclusive
+
+GIVEN it is 2027-03-01 (day 91), 00:02 IST
+ WHEN Aisha attempts to sign in
+ THEN the window is CLOSED and the closed-window response of REQ-031 is
+      returned — generic, and identical whether or not she ever worked there
+
+GIVEN an existing POST-EXIT session issued on day 89
+ WHEN it makes a request on day 91
+ THEN 403 and the session is terminated. The window is evaluated per request
+      against the exit date, never from a claim baked into the token at
+      sign-in (same rule as RULE-001 for the tenant setting)
+
+GIVEN an employee whose exit date is later corrected from 2026-11-30 to
+      2026-10-31 (a retroactive change — RULE-008)
+ THEN the window recomputes from the corrected date, and may already be closed
+  AND she is not notified of that by this feature — the exit-date change itself
+      is what she is notified of, through the ordinary change path
+```
+
+#### Audit and instrumentation
+
+```
+GIVEN any request in a POST-EXIT session
+ THEN a sensitive_read audit entry is written with actor_kind = human and the
+      session marked post-exit, exactly as REQ-014 requires for any other read
+
+GIVEN Aisha exports on day 46
+ THEN post_exit_export_requested{days_since_exit:46} is emitted, whatever the
+      tenant setting says
+  AND the export is rate-limited on the same terms as REQ-011 (SEC-10)
+```
+
+NFRs: `SEC-01`, `SEC-09`, `SEC-10`, `PRIV-08`, `REL-08`, `OBS-03`, `COMP-06`, `COMP-20`,
+`COMP-21`, `COMP-24`, `UX-04`.
+`[LAW — VERIFY: the access-request response clock, and that a 90-day convenience window plus a
+durable contact route together satisfy the right of access — DPDP Act 2023 / DPDP Rules 2025 and
+GDPR Arts. 12(3) and 15. Unverified, as of 2026-08-26.]`
+**Accepted debt, restated here so it is visible where the engineer works:** until feature 003
+ships, the durable route is the published DPO inbox, which `COMP-20` explicitly rules out. Owner:
+PM. Review 2026-11-30.
+
+---
+
+### REQ-031 — The closed-window response tells a stranger nothing
+
+> *Numbered 031 although it sits here, next to REQ-022 where it belongs. Nothing was renumbered —
+> REQ-001 to REQ-030 keep the numbers the engineer is already working from.*
+
+**As** somebody who has never worked at Northwind
+**I want** the sign-in page to tell me nothing about anyone
+**So that** it cannot be used to check where people used to work
+
+This is the same class of problem as RULE-010's confidential-access panel, and it gets the same
+rigour. Anyone can type an email address into a sign-in box. A page that says *"you left on
+14 March"* — or that merely behaves differently — confirms a stranger's employment history to
+whoever asks. **The requirement is not "show generic text". It is "be indistinguishable".**
+
+#### What must be true
+
+```
+GIVEN person A whose exit_date was 2026-11-30 (day 91, window closed)
+  AND person B who has never had any employment in this tenant
+  AND person C who is a current employee of a DIFFERENT tenant
+ WHEN each attempts to sign in with their email address
+ THEN the response to all three is byte-identical:
+        same HTTP status
+        same headers, including Set-Cookie behaviour and cache headers
+        same body, byte for byte, including any nonce or token position
+        same rendered markup
+  AND the body contains no name, no date, no employer name beyond what the
+      caller already supplied, and no statement that an account exists or does
+      not exist
+
+GIVEN a test renders the closed-window response for A, B and C
+ THEN a byte comparison of the three responses passes
+  AND if that assertion cannot be written, this requirement is not met
+```
+
+#### The timing dimension — a response that is identical but slower still leaks
+
+```
+GIVEN the three cases above
+ THEN the server-side time to produce the response must not be distinguishable
+      between them
+  AND specifically: the code path must NOT be "look the person up; if found,
+      compute the window; if closed, render the page; else render the page" —
+      that path is measurably longer for a real ex-employee, and an attacker
+      with a hundred samples can read the difference
+
+REQUIRED SHAPE:
+  the same work is done in every case — the lookup runs, and where there is no
+  person a dummy of equivalent cost stands in — and the response is released on
+  a fixed schedule rather than as soon as it is ready
+
+ASSERTION the test must make:
+  over at least 200 samples per case, the distribution of response times for
+  A, B and C is statistically indistinguishable
+  Threshold: the median difference between any two cases is under 5 ms AND a
+  two-sample test does not separate them at p < 0.01
+  [ASSUMPTION] 5 ms is my starting threshold, chosen so it sits well below
+  normal network jitter. The Test agent should replace it with a number
+  measured on the real deployment, and say what it measured.
+```
+
+#### The other channels that leak, and are in scope
+
+```
+GIVEN the closed-window path
+ THEN none of the following differs between A, B and C:
+        - the response size (no conditional whitespace, no varying nonce length)
+        - the number of redirects
+        - whether a rate-limit counter is incremented
+        - whether an email is sent
+        - whether an analytics event is emitted with a distinguishing payload
+        - the error text of a subsequent password-reset or magic-link attempt
+  AND closed_window_dpo_contact_opened carries NO tenant-identifying or
+      person-identifying payload (PRIV-07)
+
+GIVEN A signs in on day 91
+ THEN an audit entry IS written — the attempt is a security-relevant event and
+      HR must be able to see it (COMP-53)
+  AND that audit entry is invisible to the caller and does not change the
+      response in any observable way
+```
+
+**The uncomfortable part, stated rather than hidden.** Case B — a person with no record — produces
+an audit entry that says an unknown address attempted sign-in, and case A produces one that names
+a former employee. **That asymmetry is correct**: it is visible to HR, who are entitled to it, and
+invisible to the caller, who is not. The invariant is about what the *caller* can observe, not
+about what the system records.
+
+NFRs: `SEC-01`, `SEC-10`, `PRIV-07`, `PRIV-08`, `COMP-53`, `UX-04`.
+**Feature 003's durable request route faces this identical problem and should reuse this
+requirement rather than re-derive it.**
 
 ---
 
@@ -1120,6 +1295,7 @@ by field, so nobody has to interpret it.
 | **Self-correction** of the six fields | ❌ 403 | ✅ | Gated experience |
 | **Download my data** — full export, history included | ✅ | ✅ | `COMP-21`, carved out |
 | **DPO / grievance contact** | ✅ | ✅ | `COMP-06`, carved out |
+| **Post-exit sign-in, days 1–90 after exit** | ✅ reaches the three carved-out surfaces | ✅ reaches the same three, and no more | Q-09, carved out — the window is **outside** the switch and **narrower** than it (REQ-022) |
 
 **The asymmetry that will get questioned, and the answer.** With the setting OFF Aisha cannot
 *view* her change history, but her *export* contains it. That is deliberate and it is the direct
@@ -1491,6 +1667,56 @@ notice, per `PERF-05`.
 
 ---
 
+### RULE-013 — Counting the 90 days
+
+REQ-022 says what happens on each side of the boundary. This rule says how the day number is
+computed, because "90 days" has at least four wrong answers.
+
+```
+day_number = whole days elapsed since exit_date,
+             counted in the employee's work-calendar timezone,
+             where the exit date itself is day 0
+window_open = day_number <= post_exit_window_days      (90, inclusive)
+```
+
+- **Counted from `exit_date`, not from the last sign-in and not from the `exited` status
+  transition.** The status transition is a job that may run late; the exit date is the business
+  fact (`REL-08`).
+- **Whole days, not 90 × 24 hours.** Hours introduce a DST bug in the EU region and a
+  timezone bug everywhere.
+- **Evaluated per request**, never from a claim in the token.
+- **One product-wide value.** Not per tenant, not per market, until a customer needs it.
+
+**Worked example.** Aisha's `exit_date` is 2026-11-30, work calendar Asia/Kolkata. December has 31
+days, January 31, February 2027 has 28. `2026-11-30 + 90 = 2027-02-28`, so the window is open
+through the whole of 28 February and closes at the start of 1 March 2027.
+
+**Boundary example.** At 2027-02-28, 23:58 IST she is on day 90 — **open**. Four minutes later, at
+2027-03-01 00:02 IST, she is on day 91 — **closed**. A session issued at 23:58 is terminated on its
+next request after midnight, because the window is re-evaluated per request.
+
+**Boundary example — the exit date falls on 30 November and the window would land on 29 February.**
+An exit on 2027-12-01 gives `+90 = 2028-02-29`, a real date in a leap year. An exit on 2026-12-01
+gives `+90 = 2027-03-01`, because 2027 has no 29 February. Both are correct because this is date
+arithmetic, not month arithmetic. Assert both.
+
+**The nasty one — the exit date is corrected retroactively.** On 2027-01-20 HR corrects Aisha's
+exit date from 2026-11-30 to 2026-10-31. The window recomputes from the corrected date and now
+closes on 2027-01-29 rather than 2027-02-28 — **it may already be closed at the moment of the
+correction.** That is the right answer: the window follows the business fact. She is not notified
+about the window; she is notified about the exit-date change, through the ordinary change path.
+`[ASSUMPTION]` no grace period is added for this case. If a tenant reports it as unfair, the fix
+is a grace period on the window, not a frozen window — flag to the PM.
+
+**The other nasty one — no work calendar.** A leaver with no resolvable timezone falls back to the
+tenant default, exactly as RULE-009 does. Never UTC-by-accident: a 5.5-hour error can close the
+window a day early for someone in India.
+
+Parameters: `post_exit_window_days` = **90**, product-wide, with the reasoning recorded in
+`10-opportunity.md` and the decision log. Not a tenant setting in v1.
+
+---
+
 ## Data specification
 
 `COMP-34` is the gate: a new personal-data field cannot exist without a named feature, a
@@ -1614,6 +1840,24 @@ is where the leaks live.
 `DELETE` revoked, with the one column grant for erasure. Suppression is a rendering decision taken
 per request, never a write.
 
+### A person's access to this feature, across the exit
+
+| From | Event | To | Who can trigger | Side effects |
+|---|---|---|---|---|
+| `active` / `on_leave` / `notice` | — | Full access, subject to the tenant setting | — | ordinary behaviour |
+| `notice` | `exit_date` reached | **Post-exit window**, day 0 | system (job) | access-revocation event fires (feature 001, `SEC-09`) · sign-in survives, scoped to the carve-out allowlist · the exit-time notice of REQ-022 names the end date |
+| Post-exit window | each request | Post-exit window | — | window re-evaluated per request from `exit_date` (RULE-013); audit entry written |
+| Post-exit window | day 90 passes | **Closed** | system, by the clock | no notification is sent — a "your window has closed" email would be the deadline framing the copy rules forbid |
+| Post-exit window | `exit_date` corrected earlier | **Closed**, possibly immediately | HR, by correcting the date | RULE-013's nasty case |
+| Closed | sign-in attempted | Closed | anybody | the REQ-031 response · audit entry · `closed_window_dpo_contact_opened` if the contact is opened |
+| Closed | rehired (new employment) | Full access | HR | a new employment resets everything; the old window is irrelevant |
+| Any | erased | Closed | DPO, via `erasePerson` | REQ-031's indistinguishability must hold for an erased person too — otherwise erasure itself becomes observable |
+
+**The last row is easy to miss.** After erasure there is no person to find, so an erased
+ex-employee's sign-in attempt takes the "not found" path. If that path is distinguishable, the
+system leaks *"this person was erased here"* — which is a statement about somebody's data. REQ-031's
+case B covers it, and the test fixture must include an erased person, not only a never-existed one.
+
 ---
 
 ## Permissions matrix
@@ -1641,6 +1885,26 @@ Legend: ✅ allowed · **own** allowed for own record only · **team** allowed f
 | Read a suppressed `case_handling` entry | ❌ | ❌ | ❌ unless a case handler | ❌ | ❌ | 401 |
 | `PUT /admin/record-view-setting` | ❌ | ❌ | ✅ `hr_admin` | ✅ `hr_admin` | **❌** | 401 |
 | Read the setting's change history | ❌ (sees only the notice and her own export section) | ❌ | ✅ | ✅ | ❌ | 401 |
+
+### The seventh persona: Aisha after she has left
+
+The matrix above is written for people who still work here. A post-exit session is its own
+principal type and is **narrower than every column above it** (REQ-022).
+
+| Action | Aisha, days 1–90 after exit | Aisha, day 91 onward |
+|---|---|---|
+| Sign in | ✅ — session marked post-exit | ❌ — the closed-window response of REQ-031 |
+| `GET /me/record` — minimal own-fields view | ✅ **whatever the tenant setting says** | ❌ |
+| `GET /me/export` — Download my data | ✅ **whatever the tenant setting says** | ❌ |
+| `GET /dpo-contact` | ✅ | ✅ — it is on the closed-window page itself |
+| `GET /me/history` | ❌ 403 `POST_EXIT_SESSION` — **even when the setting is ON** | ❌ |
+| `GET /me/access-log` | ❌ 403 `POST_EXIT_SESSION` — **even when the setting is ON** | ❌ |
+| `PATCH /me/details` — self-correction | ❌ 403 — she is no longer an employee correcting her own live record | ❌ |
+| Any endpoint added by a later feature | ❌ by default — the post-exit set is an allowlist, not a denylist | ❌ |
+
+**Two things to read off that table.** The window is *outside* the tenant switch on the first three
+rows and *narrower* than it on the next three. And the last row is the one that decays: a post-exit
+allowlist that is a denylist will silently widen every time someone ships an endpoint.
 
 ### Where this differs from the Part 2 visibility matrix, and why
 
@@ -1686,8 +1950,12 @@ anticipate are marked **★ NEW**.
 |---|---|
 | **New joiner, day one, no history** | Record view opens with current values and `history.empty`. The access log shows the joiner's own first read and nothing else. No spinner, no blank panel |
 | **New joiner whose hire date is in the future** (`pre_hire`) | ★ **NEW.** Can she open My record before she starts? She has no login until provisioning. **Specified: if a `pre_hire` person has a session, the record view works and shows her hire date labelled "Takes effect 1 October 2026".** Hiding her own start date from her would be absurd |
-| **Leaver, last day** | Works normally until access is revoked |
-| **Leaver, three weeks later** | **REQ-022. Currently no route at all. Blocking question Q-09** |
+| **Leaver, last day** | Works normally. The exit-time notice names the date her sign-in ends (REQ-022, `postexit.exitnotice`) |
+| **Leaver, three weeks later** (day 21) | Signs in to the carve-out screen only: minimal view, export, DPO contact. History and access log are 403 even if the tenant setting is ON (REQ-022) |
+| **Leaver, four months later** (day 121) | The generic closed-window response, byte-identical to what a stranger gets (REQ-031). Her right of access has not expired and the copy says so |
+| **Leaver whose exit date is corrected backwards** | The window recomputes and may already be closed (RULE-013). Correct, and deliberate |
+| **Leaver who is rehired on day 45** | The new employment gives full access immediately; the window is irrelevant. Both employments appear in her record (REQ-018) |
+| **Leaver who was erased on day 30** | Sign-in takes the "not found" path and must be indistinguishable from a stranger's, or erasure itself becomes observable (REQ-031, case B) |
 | **Rehire with two employments** | REQ-018. Both periods shown; two labelled numbers; the access log spans both |
 | **Rehire where the first employment was erased** | ★ **NEW.** `erasePerson` minimises the person row, so a rehired person is the *same* person row with `legal_name = '[erased]'`. **Specified: erasure of a person who is later rehired must be treated as a new person, not a reuse of the minimised row.** Reusing it shows the returning employee the string "[erased]" as her own name. → Q-14 to the engineer, not blocking this slice because rehire-after-erasure needs no screen here |
 | **Transfer between entities or countries** | Not in this slice — one tenant, one entity. The work location change appears in history like any other change |
@@ -1772,6 +2040,9 @@ deliberately so a reviewer can confirm it rather than assume it. Two money-adjac
 | Does the access log let Aisha identify a colleague she should not? | ★ **NEW.** Yes, in one case: an entry naming a **case handler by name** would identify the investigator. Suppressing `case_handling` handles it. But a case handler who *also* has HR duties may read the same record for an ordinary purpose, and that entry is shown. **Specified: that is correct and stays** — it is an ordinary HR read with an ordinary purpose, and hiding every read by a person who happens to be an investigator would make investigators invisible in every record they touch |
 | Does the export leak a third party? | Only `emergency_contact`, which Aisha supplied herself. `not_included` says so explicitly (RULE-012) |
 | Can Aisha see a reason that names someone else? | Yes, today, and it is not fixable by deletion because the ledger is immutable. REQ-021 specifies the append-a-correction route and Q-13 asks the engineer how the schema expresses it |
+| Can the sign-in page be used to check where somebody used to work? | **No, and this is REQ-031.** The closed-window response is byte-identical, and identically *timed*, for a real ex-employee, a total stranger, and a person who was erased. It is the same class of problem as RULE-010's panel: the natural implementation — a helpful, personalised message — is the leak |
+| ★ **NEW** — does a 90-day working credential widen what a leaver can reach? | The window is an allowlist of three surfaces, not a relaxation of exit revocation. A post-exit session cannot reach the history, the access log, self-correction, or anything a later feature adds. If a reviewer finds any other route reachable from a post-exit session, that is a **blocker**, not a finding (`SEC-09`) |
+| ★ **NEW** — does the window let a leaver watch their old record for 90 days? | No. The minimal view is a snapshot of her own fields; the access log — the surveillance-adjacent surface — is exactly what a post-exit session cannot open |
 | Would we be comfortable explaining this screen to the people it operates on? | Yes — that is the entire feature. The one sentence we would struggle with is *"your employer has turned this off"*, which is why REQ-012 says it out loud rather than leaving a blank page (charter Part 3, the overriding test) |
 
 ---
@@ -1788,7 +2059,8 @@ Listing an ID without a number is not a requirement. Each row is an assertion.
 | `SEC-05` | Every read and every self-correction writes an append-only entry with actor, timestamp and previous value. `UPDATE`/`DELETE` remain revoked | REQ-008, REQ-014 |
 | `SEC-07` | `reason`, `preferred_name`, `pronouns` and `emergency_contact` are escaped on render. A reason containing `<script>` renders as text | REQ-003, REQ-008 |
 | `SEC-08` | Profile photo: type-checked, size-limited, served by short-lived signed URL, never from a public bucket | REQ-008 |
-| `SEC-09` | Session lifetime bounded; the setting is re-evaluated per request, never carried in a token | REQ-016 |
+| `SEC-09` | Session lifetime bounded; the setting is re-evaluated per request, never carried in a token. **The 90-day post-exit window is a narrowly-scoped, time-boxed exception to exit revocation — it reaches three surfaces and nothing else, and the window is re-evaluated per request from `exit_date`** | REQ-016, REQ-022, RULE-013 |
+| `PRIV-08` *(second target)* | The closed-window response is byte-identical **and statistically indistinguishable in timing** across a real ex-employee, a stranger, and an erased person: median difference under 5ms over ≥200 samples per case, and no two-sample test separates them at p < 0.01 | REQ-031 |
 | `SEC-10` | Export rate-limited: **5 requests per employee per hour**, 429 beyond, alert on repeated breach | REQ-011 |
 | `PRIV-02` | No new personal-data field is collected by this feature. It renders and exports what exists | Data specification |
 | `PRIV-07` | No PII in any event payload, log line or trace. `self_correction_saved` carries the field **name** only. Asserted by a test that a known phone number never appears in log output | Events, REQ-008 |
@@ -1880,7 +2152,7 @@ GIVEN a retention period elapses
 | `audit_log_retention_days` | 2555 | audit entries incl. sensitive reads | `[LAW — VERIFY: India CERT-In Directions 2022 log retention is widely cited as 180 days and is frequently mis-stated; EU/UK retention is not fixed by GDPR and follows the employer's own schedule]` | 2026-08-26 |
 | `access_log_display_window_days` | 365 | what the screen shows | Product decision, bounded by the row above (RULE-007) | 2026-08-26 |
 | `export_artefact_retention_days` | 7 `[ASSUMPTION]` | generated export files | Product; confirm with the PM | 2026-08-26 |
-| `post_exit_access_window_days` | **undecided — REQ-022** | ex-employee access to the carve-out | `[LAW — VERIFY: access-request response clock under DPDP Act 2023 / DPDP Rules 2025 and GDPR Art. 12(3)]` | 2026-08-26 |
+| `post_exit_window_days` | **90** — product-wide, not per tenant | ex-employee sign-in reaching the carve-out only | Product decision, Q-09 resolved 2026-08-26. Floor: it must not be shorter than the response clock of the obligation it fronts `[LAW — VERIFY: DPDP Act 2023 / DPDP Rules 2025 and GDPR Art. 12(3), reported to be on the order of one month]` | 2026-08-26 |
 | `legal_hold_disclosable` | **false** (fail closed) | telling a person a hold exists | `[LAW — VERIFY: DPDP Act 2023 and GDPR Art. 15 per market]` | 2026-08-26 |
 | `dpo_response_clock_days` | tenant-configured | the REQ-013 contact | `[LAW — VERIFY per market]` (`COMP-24`) | 2026-08-26 |
 
@@ -2107,6 +2379,61 @@ pre-ticked box, no "recommended" badge, no countdown (charter Part 3, dark patte
 | `dpo.unconfigured` | `Your organisation hasn't listed a contact for data questions yet. Write to {fallback} and we'll route it.` |
 | `hold.disclosed` | `Some of your data is being kept for a legal process that started on {date}. That means it can't be deleted for now. It doesn't affect what you can see or download.` |
 
+### After you leave
+
+Three strings, and the copy risk in all three is the same one: **never imply the right expires.**
+The `[LAW — VERIFY]` position is that the right of access persists for as long as the company holds
+the data, and with no purge job running yet the data is held indefinitely. **"Use it or lose it"
+framing is banned outright** — no countdown, no "hurry", no "last chance", no progress bar, no
+red text on the remaining days, nowhere in the product, the exit email, or a support macro
+(charter Part 3, manufactured urgency).
+
+| Key | Exact string |
+|---|---|
+| `postexit.exitnotice` | `Your sign-in ends on {date}. After that you can still ask for a copy of your data — there's no deadline on that. {dpo_name} at {company} handles those requests.` |
+| `postexit.notice` | `You've left {company}, so this is a reduced view. You can see your own details and download everything we hold about you. Your sign-in ends on {date} — your right to a copy of your data doesn't.` |
+| `postexit.blocked` | `That part isn't available after you leave. You can still see your details and download your data.` |
+
+**`postexit.exitnotice` says "your sign-in ends on {date}", never "your data access ends".** That is
+the exact wording the PM asked to be held to, and the distinction is the whole point: the sign-in
+is ours to end, the right is not.
+
+#### The closed-window page — day 91 onward
+
+The PM drafted this. Keyed here with two changes, both noted.
+
+| Key | Exact string |
+|---|---|
+| `closedwindow.heading` | `Asking for a copy of your data` |
+| `closedwindow.body` | `If you used to work here, your sign-in has ended — but your right to a copy of your data has not. While the company still holds records about you, you can ask for a copy, ask for a correction, or ask for deletion. There is no deadline on this.` |
+| `closedwindow.contact` | `Contact: {dpo_name}, {dpo_email}. They must reply within the time the law allows, and they must tell you what they hold.` |
+| `closedwindow.contact_unconfigured` | `Contact: {fallback_email}. They must reply within the time the law allows, and they must tell you what they hold.` |
+
+**Change 1 — the conditional opening survives, deliberately.** *"If you used to work here"* is what
+makes the page sayable to a stranger. It is not hedging; it is the indistinguishability requirement
+showing up in the grammar (REQ-031).
+
+**Change 2 — `{dpo_name}` and `{dpo_email}` are a problem, and here is the resolution.** The PM's
+draft interpolates *the tenant's* published contact. **That interpolation is itself an enumeration
+oracle**: if the page shows Northwind's DPO to a person who worked at Northwind and something else
+to a stranger, the page has just answered "did this person work at Northwind". So:
+
+- The closed-window page is served **per tenant** — reached at a tenant's own sign-in address — and
+  it renders **that tenant's** contact for **every** caller, whether or not they ever worked there.
+  The contact is not a secret; it is published in-product under `COMP-06` and is meant to be
+  reachable by anyone.
+- If a tenant has no contact configured, `closedwindow.contact_unconfigured` is used **for every
+  caller at that tenant**, never per person.
+- The two strings must be the **same rendered length class** so response size does not vary. If
+  they cannot be, pad to a fixed length. This is REQ-031's "response size" bullet, and it is the
+  one that will get missed.
+
+**Localisation check against my own rules.** `{date}` in all three post-exit strings goes through
+the RULE-009 business-date formatter — `28 February 2027`, never `2027-02-28` (`I18N-02`).
+`{dpo_name}` is one string with no first/last assumption (`I18N-03`). None of the four strings
+contains a number that needs pluralising, which is deliberate: a string like *"{n} days left"*
+would be both a pluralisation problem and the banned deadline framing in one line.
+
 ### Errors and system states
 
 | Key | Exact string |
@@ -2169,10 +2496,19 @@ employee-facing app.** No PII in any payload — field names and enum values onl
 | `self_correction_rejected` | `{field, reason: "not_allowlisted"\|"validation"\|"conflict"}` | No |
 | `data_export_requested` | `{mode: "sync"\|"async"}` | **Yes — carve-out evidence** |
 | `dpo_contact_opened` | `{from: "record"\|"access_entry"\|"offstate"}` | **Yes — carve-out evidence** |
+| `post_exit_export_requested` | `{days_since_exit}` — an integer 0–90, no identity, no tenant name beyond the ordinary tenant scoping | **Yes — the window is outside the switch** |
+| `closed_window_dpo_contact_opened` | `{}` — **deliberately empty.** No `days_since_exit`, no person id, no "did they exist" flag. A payload that differed between a real ex-employee and a stranger would defeat REQ-031 through the analytics table | **Yes — the window is outside the switch** |
 
-**The four that must fire with the setting off** are `record_view_blocked_by_tenant_setting`,
-`own_record_viewed`, `data_export_requested` and `dpo_contact_opened`. Without them the PM's tenant
+**The six that must fire with the setting off** are `record_view_blocked_by_tenant_setting`,
+`own_record_viewed`, `data_export_requested`, `dpo_contact_opened`,
+`post_exit_export_requested` and `closed_window_dpo_contact_opened`. Without them the PM's tenant
 activation metric has no denominator and the carve-out has no evidence it works.
+
+**`days_since_exit` is the tuning signal, not a kill criterion.** 90 is a judgement. If a
+meaningful share of exports cluster near day 90, or people keep reaching the closed-window page,
+the window is too short and it gets lengthened — the PM has said so explicitly, and the answer is
+not to point at the DPO inbox. If nothing arrives after week two, that is an argument for
+shortening it, and `SEC-09` would prefer that.
 
 **Metrics these feed** (from `10-opportunity.md`): tenant activation · the north star (two opens in
 30 days, in ON tenants, always reported with its denominator) · deactivations with reasons ·
@@ -2196,6 +2532,7 @@ The PM raised Q-01 to Q-08 in `10-opportunity.md`. Q-05 and Q-06 were resolved b
 | **Q-06** | Must the right of access be carved out of the switch? | Resolved by the human: **yes, carved out**. RULE-002 draws the line field by field |
 | **Q-07** | "HR of that person" implies scoped HR | **No change in this slice** — this feature builds no HR-facing screen, so there is nothing to scope. It becomes a real requirement with the first HR console, and is on the PM's deferred list |
 | **Q-08** | Does the product tell Aisha the setting is off? | **Yes** (REQ-012). The notice is factual, does not name an individual, and does not invite her to lobby anyone. **Still open as a values question for the human; only `offstate.notice` changes if the answer flips** |
+| **Q-09** | The carve-out reached only people who can sign in | **Resolved 2026-08-26. 90-day post-exit window, in scope here** (REQ-022, REQ-031, RULE-013); durable tracked route in feature 003; the gap is accepted debt, owner PM, review 2026-11-30 |
 
 I also closed one of feature 001's open questions: **Q-06 to the BA** — what a 409 body must
 contain — answered in REQ-010 for this feature's endpoints.
@@ -2206,7 +2543,7 @@ Each is addressed to a named agent or role and marked blocking or not.
 
 | # | To | Question | My assumption / recommendation | Blocking? |
 |---|---|---|---|---|
-| **Q-09** | Human + PM + counsel | **An ex-employee cannot sign in, so the carve-out serves everyone except the population most likely to exercise the right of access.** Which route: a time-boxed post-exit window, or an unauthenticated DPO route with a tracked clock? | Build the time-boxed window — it needs no new channel and it is auditable. Publish the DPO route regardless | **YES.** It decides whether the carve-out delivers what the decision log promises |
+| **Q-09** | — | **RESOLVED 2026-08-26** (`99-decision-log.md`, "Q-09 resolved: a post-exit window now, a tracked request route in 003"). A **90-day post-exit sign-in window** is in scope for this feature, reaching the carve-out screen only and sitting outside the tenant switch — REQ-022, REQ-031, RULE-013. The durable tracked request route is **feature 003**. The gap between them is accepted debt: until 003 ships, the durable route is the published DPO inbox, which `COMP-20` explicitly rules out. **Owner: PM. Review 2026-11-30.** | — | **No longer blocking** |
 | **Q-02** | Legal | Exact wording of the standing confidential-access panel | Draft in the microcopy table; behaviour already specified | **YES** for the copy. Not for the behaviour |
 | **Q-10** | PM | Is the seven-value purpose list enough for v1 — `pay_review`, `payroll_run`, `record_correction`, `onboarding`, `case_handling`, `employee_request`, `support`? | Yes for v1. A missing purpose degrades gracefully to "Reason not recorded" plus an alert, so a wrong guess is recoverable | No |
 | **Q-11** | Counsel | Does a **masked** national identifier satisfy the right to obtain a copy of one's own data? | Mask on screen and in the export; full value via the DPO route | Blocking **release sign-off**, not the build |
@@ -2238,6 +2575,22 @@ Marked so they can be challenged rather than inherited.
 8. `[ASSUMPTION]` A rendered page that Aisha keeps reading after the setting is switched off is
    acceptable (RULE-001, the nasty one). If the human disagrees, this feature needs a push channel
    and that is a different size of slice.
+9. `[ASSUMPTION]` **90 days is the PM's judgement, not a finding**, and he has said so. My only
+   constraint on it is the floor: it must not be shorter than the response clock of the obligation
+   it fronts `[LAW — VERIFY]`. `days_since_exit` is what tells us whether it is right.
+10. `[ASSUMPTION]` **5 ms is my starting timing threshold for REQ-031**, chosen to sit below normal
+    network jitter, not measured. The Test agent replaces it with a number from the real
+    deployment.
+11. `[ASSUMPTION]` **The exit-time notice can be a screen rather than a message.** There is no
+    notification queue, so I specified it as rendered on the record view during `notice` status and
+    again on the first post-exit sign-in. If the tenant's offboarding runs through email that we do
+    not control, the PM's own risk applies — a support macro or an HR email saying "you have 90
+    days to download your data" undoes the copy rule, and nothing in this product can stop it.
+    **Worth checking with the first tenant, as the PM said.**
+12. `[ASSUMPTION]` The closed-window page is reached at a **tenant-specific** sign-in address, which
+    is what makes it safe to render that tenant's DPO contact to every caller. If sign-in is ever a
+    single shared address across tenants, REQ-031 needs re-deriving, because the page could then not
+    name any contact without answering "which employer".
 
 ## Handoff
 
@@ -2253,12 +2606,36 @@ Marked so they can be challenged rather than inherited.
   and the access log is about to be built directly on top of it.
 - **Q-13** — how a correcting ledger entry supersedes the original for display, without breaking
   append-only. Blocks REQ-021 only.
-- **Q-09** — the ex-employee route. Blocks the compliance claim in RULE-002, not your build. Do not
-  design around it until a human answers; it is not yours to choose.
 - **Q-02** — the confidential-panel wording. Build the behaviour, leave the string keyed and
   swappable.
 
+**Resolved since I raised it: Q-09.** The 90-day post-exit window is now specified and in scope —
+REQ-022, REQ-031, RULE-013. Read the next block before you build it.
+
 **Open questions not blocking you:** Q-10, Q-11, Q-14, Q-15, Q-16, Q-17.
+
+**★ The post-exit window is an exception to exit revocation, not a change to it.**
+
+Feature 001 revokes access at exit and that behaviour **stays exactly as it is**. `SEC-09` still
+holds. What REQ-022 adds is one narrowly-scoped, time-boxed exception on top of it. Three things
+follow, and the first is the one that will be got wrong:
+
+1. **The post-exit session is an allowlist of three surfaces, not a relaxed employee session.**
+   Minimal own-fields view, export, DPO contact. Everything else is 403, *including when the tenant
+   setting is ON* — the window is narrower than the switch, never wider. Build it so a new endpoint
+   is unreachable from a post-exit session **by default**. A denylist here decays the first time
+   somebody ships a route and forgets. The PM's own words: any other route reachable from a
+   post-exit session is a **blocker**, not a finding.
+2. **The window is computed per request from `exit_date`** (RULE-013), never from a claim baked into
+   the token at sign-in, and never from the `exited` status transition — that transition is a job
+   that can run late, and the exit date is the business fact.
+3. **REQ-031 is a security requirement wearing microcopy's clothes.** The closed-window page must be
+   byte-identical *and* timing-indistinguishable across a real ex-employee, a stranger, and an
+   erased person. The obvious implementation — look them up, and if found render the page — is
+   measurably slower for a real ex-employee and is the leak. Do the same work in every case and
+   release the response on a fixed schedule. If you think the constant-time shape is not achievable
+   in this stack, **say so before building it**, because the alternative is not "ship it anyway" —
+   it is a design conversation about the sign-in surface.
 
 **★ The thing I most need you to see: the `app.tenant_id` GUC.**
 Feature 001's decision log accepted this as open debt, owned by you, with the reviewer's note that
@@ -2296,13 +2673,27 @@ feature ships, not after.**
 - That `subject_person_id` on the audit entry is worth adding now. Without it, REQ-018's
   two-employment case is a four-way union that the next module will fall out of.
 
-**To hrms-test-automation, the three tests I care about most:**
+**To hrms-test-automation, the tests I care about most:**
 
 1. **REQ-007 / RULE-010** — render the access log for a person with suppressed entries and for a
    person with none, and assert the panel region is byte-identical. If that assertion cannot be
    written, the feature is not shippable.
-2. **REQ-001** — all six endpoints × six personas × three setting states (unset, off, on).
+2. **REQ-031 — the same shape, one level harder.** Assert the closed-window response is byte-identical
+   across three fixtures: a real day-91 ex-employee, a person who never existed, and a person who was
+   **erased**. Then assert the timing: ≥200 samples per fixture, median difference under 5ms, no
+   two-sample test separating them at p < 0.01. **Replace my 5ms with a number you measured on the
+   real deployment and say what you measured** — I picked it to sit below normal network jitter, not
+   from data. A timing test that only ever runs on a developer laptop is theatre.
+3. **REQ-001** — all six endpoints × six personas × three setting states (unset, off, on).
    Fifty-four cases, and "unset" must behave exactly like "off" in every one.
-3. **REQ-009** — the mixed payload. `{"personal_phone":"…","manager_employment_id":"…"}` returns
+4. **REQ-022 — the post-exit allowlist.** Every endpoint in the product, called from a post-exit
+   session, with the tenant setting **ON**. Exactly three return 200. Write it so it enumerates
+   routes rather than listing them by hand, so a route added in feature 004 fails this test instead
+   of quietly passing it — the same failure mode as feature 001's hand-written `TENANT_SCOPED` list
+   that survived 28 passing tests.
+5. **REQ-022 / RULE-013 — the boundary.** Day 89 open, day 90 open, day 91 closed, in the employee's
+   timezone; a session issued on day 89 terminated on its first request after midnight; and a
+   retroactively corrected exit date closing the window immediately.
+6. **REQ-009** — the mixed payload. `{"personal_phone":"…","manager_employment_id":"…"}` returns
    403 **and the phone number is not saved**. A partial application here is a privilege escalation.
 
