@@ -206,11 +206,68 @@ Both halves of the honest picture:
 narrates to employees; it should not be able to switch off a person's statutory right by leaving a default
 alone.
 
-**This is not mine to decide alone.** → **Q-06 — BLOCKING, for the human and for counsel.** If the answer
-is "no carve-out, everything sits behind the switch", then this brief needs a named alternative
-right-of-access path, with an owner and a date, before the feature ships — because otherwise we are
-selling a product that cannot answer a lawful request in its default state, and that is a sentence someone
-will one day read back to us.
+**Q-06 — RESOLVED 2026-08-26, carve-out accepted.** Recorded in `99-decision-log.md`. The switch governs
+the *experience* — the record view, the change history, the access log. It never governs the statutory
+right.
+
+### The carve-out had a hole: ex-employees
+
+The BA found it, and it matters more than the carve-out itself. "Download my data is always available"
+holds **only for someone who can sign in.** Feature 001 revokes access at exit (`SEC-09`, the
+`notice → exited` transition emits an access-revocation event). So the carve-out reached everyone except
+**the population most likely to exercise the right** — people who have just left.
+
+**Q-09 — RESOLVED 2026-08-26** (`99-decision-log.md`). Two routes with different jobs:
+
+| | What it is | Where it lives |
+|---|---|---|
+| **The post-exit window** | **Convenience.** Sign-in keeps working for a period after exit, so the existing self-serve export covers the common case. Cheap — the login and the export both already exist | **In scope, feature 002** |
+| **The durable tracked request route** | **The obligation.** An unauthenticated request that works for as long as the data is held, with identity verification and the `COMP-24` response clock | **Feature 003, deferred** |
+
+**The window I propose: 90 days after the exit date.** The basis, in order of weight:
+
+1. **It must not be shorter than the response clock of the obligation it fronts.** A convenience layer that
+   expires before a person could have completed a request through the proper route is theatre. The access
+   response clock is on the order of one month `[LAW — VERIFY: GDPR Art. 12(3) and the DPDP Act 2023 /
+   DPDP Rules 2025 equivalent, as of 2026-08-26]`, so anything at or under 30 days fails this test.
+2. **It outlasts the cycle where these requests actually arise** — final settlement, the last payslip, a
+   reference dispute, a question at a new employer. Those land in weeks, not days.
+3. **It is short enough that `SEC-09` still means something.** Access *is* revoked at exit. The window is a
+   narrow exception that reaches **the carve-out screen only** — export, the minimal own-fields view, the
+   DPO contact. No record view, no access log, no directory, no matter what the tenant setting says.
+
+One product-wide value, not a per-tenant setting. The trigger to make it configurable is a customer whose
+security posture genuinely cannot accept 90 days — the second-customer rule, not a config screen built in
+advance.
+
+**How the window interacts with the tenant setting — explicitly, because it is easy to get backwards:**
+the window sits **outside** the switch, exactly as the rest of the carve-out does. **An ex-employee of a
+tenant that never switched the record view on still reaches the export.** Off is off for the experience;
+it was never off for the right.
+
+**The window is not a deadline on anyone's rights, and the copy must never imply one.** The right of access
+persists for as long as the company holds the data. There is no retention purge job yet (feature 001, not
+implemented), so in practice the data is held indefinitely and the right does not expire at all right now.
+"Use it or lose it" is the one thing that must not ship.
+
+**What an ex-employee sees when the window has closed.** This is a real screen with real words, and it is
+where this reads as helpful or as a brush-off. The trap: **the message cannot be personalised.** Anyone can
+type an email address into a sign-in box, so a page that says *"you left on 14 March"* confirms a stranger's
+employment history to whoever asks. Same indistinguishability problem the durable route will face in 003.
+So the closed-window response is generic, and identical whether or not that person ever worked there:
+
+> **Asking for a copy of your data**
+> If you used to work here, your sign-in has ended — but **your right to a copy of your data has not.**
+> While the company still holds records about you, you can ask for a copy, ask for a correction, or ask for
+> deletion. There is no deadline on this.
+> Contact: *[the tenant's published DPO / grievance contact]*. They must reply within the time the law
+> allows, and they must tell you what they hold.
+
+**ACCEPTED DEBT, recorded here and not only in the log:** until feature 003 ships, that durable route **is
+the published DPO contact — which is exactly the "email address" `COMP-20` says is not good enough.** An
+inbox starts no clock, leaves no audit trail and produces no evidence. This is a known, deliberate gap, not
+an oversight. **Owner: hrms-product-manager, to scope feature 003. Review date: 2026-11-30.** If 003 has
+not shipped by then, the debt is re-raised at the next release gate rather than ageing quietly.
 
 ## The experience spine
 
@@ -250,7 +307,7 @@ Step zero is now the whole funnel, and the metrics below are restated accordingl
 | Version | Contents | Proves | Rough size |
 |---|---|---|---|
 | **Thin slice** | `apps/web` + authenticated session + one read-only route, **gated by the tenant setting and fail-closed when the setting is unset**. Current values · full change history with reason and decider · future-dated changes labelled · **who has looked at your record** · the "some things are not shown, and here is why" panel · every read writes a `sensitive_read` audit entry | Whether the access log lands or alarms, **in a tenant that opted in** | days |
-| **Recommended** ✅ | Thin slice **+** the tenant setting itself: off by default, one admin control, **the flip logged and employees notified in both directions** (Q-04) **+** the always-available export carve-out, pending Q-06 **+** self-correction of the six allowlisted fields with a **server-side enforcing function** (closes the open MINOR from 001) **+** Download my data (JSON, `COMP-21`) **+** the events under Success metrics **+** the DPO/grievance contact in-product (`COMP-06`) **+** mobile-first at 360px, keyboard-complete, axe-clean | That it survives real use by 400 people — **and that a customer will switch it on** | weeks |
+| **Recommended** ✅ | Thin slice **+** the tenant setting itself: off by default, one admin control, **the flip logged and employees notified in both directions** (Q-04) **+** the always-available export carve-out (Q-06, resolved) **+** the **90-day post-exit sign-in window** reaching the carve-out screen only (Q-09) **+** self-correction of the six allowlisted fields with a **server-side enforcing function** (closes the open MINOR from 001) **+** Download my data (JSON, `COMP-21`) **+** the events under Success metrics **+** the DPO/grievance contact in-product (`COMP-06`) **+** mobile-first at 360px, keyboard-complete, axe-clean | That it survives real use by 400 people — **and that a customer will switch it on** | weeks |
 | **Everything asked for** | The above **+** directory and org chart (REQ-007) · HR admin UI for creating and changing employees (REQ-002) · bulk import (REQ-008) · correction *requests* for locked fields with a response clock · change notifications (needs a queue) · document vault · manager view of the team · full Rights Centre (erasure request, consent withdrawal) · native mobile app | — | — |
 
 **Recommended: the middle option.** It is roughly a third of "employee self-service" as normally
@@ -271,6 +328,9 @@ understood, and it is one person doing one whole job end to end (product truth 7
   notification. **Until it exists, the UI must name who to contact instead of showing a dead end (`UX-04`).**
 - **Change notifications by email or push** — beyond the one required by Q-04 for the setting itself. There
   is no queue and no notification service; the toggle notice is the minimum, not the start of a platform.
+- **The durable tracked request route for ex-employees** — unauthenticated, identity-verified, with the
+  `COMP-24` clock. **Feature 003.** The 90-day window covers the common case now; it does not discharge the
+  obligation, and the gap is written up as accepted debt above rather than left implied.
 - **Bulk import, documents, the full Rights Centre.** Named, deferred and dated below.
 - **Any AI.** No model call in this feature. Recorded deliberately, not by omission: `COMP-70`–`COMP-79`
   do not apply.
@@ -290,13 +350,15 @@ contact published in-product · `COMP-23` if a legal hold exists on Aisha she is
 law permits `[LAW — VERIFY: whether DPDP Act 2023 and GDPR Art. 15 permit or require informing a data
 subject that a litigation hold exists, per market — unverified, as of 2026-08-25]` · `SEC-01` server-side
 authorisation on every endpoint, **the tenant setting included — off must mean 403, never a hidden nav
-item** · `SEC-10` rate limit on the export endpoint · `PERF-01` · `A11Y-01`–`A11Y-05` · `PRIV-07` no PII
+item** · `SEC-09` the post-exit window is a **narrowly-scoped, time-boxed exception** to exit revocation
+and must reach the carve-out screen and nothing else · `SEC-10` rate limit on the export endpoint · `PERF-01` · `A11Y-01`–`A11Y-05` · `PRIV-07` no PII
 in logs or events.
 
 **Deferred — dated and owned:**
 
 | Deferred | By when | Owner |
 |---|---|---|
+| **Durable tracked request route for ex-employees** — unauthenticated, identity-verified, `COMP-24` clock. **Until it ships the durable route is the published DPO inbox, which `COMP-20` explicitly rules out** | feature 003; **debt reviewed 2026-11-30** | PM |
 | Correction requests for locked fields, with response clocks (`COMP-24`) | feature 003 | PM |
 | Erasure request and consent withdrawal in the Rights Centre (`COMP-12`, `COMP-22` user-facing) | before the first paying enterprise tenant | PM |
 | Retention purge job actually running (`COMP-31`) — carried from 001 | before the first tenant with an ex-employee past the statutory window | Full-Stack |
@@ -353,7 +415,14 @@ not a product.
 `own_record_viewed` · `record_history_expanded` · `future_dated_change_shown` · `access_log_viewed` ·
 `access_log_scrolled_past_first_entry` · `hidden_data_explainer_opened` · `self_correction_saved{field}` ·
 `self_correction_rejected{field, reason}` · `data_export_requested` · `dpo_contact_opened`.
+`post_exit_export_requested{days_since_exit}` · `closed_window_dpo_contact_opened`.
 **The export and DPO events must fire regardless of the switch** — they are the carve-out's evidence.
+
+**One tuning signal, not a kill criterion.** 90 days is a judgement, not a finding. `days_since_exit` on
+each post-exit export, plus the count of people reaching the closed-window screen, tells us whether it is
+right. **If a meaningful share of ex-employee requests arrive after day 90, the window is too short and we
+lengthen it** — we do not shrug and point at the DPO inbox. The reverse — nobody uses it past week two —
+is an argument for shortening it, and `SEC-09` would welcome that.
 
 ## Kill criteria
 
@@ -403,6 +472,16 @@ not a product.
   investigator opened his file. **Suppression alone is not enough: a line that appears only when it applies
   is itself a signal.** The standing "some authorised access is not listed, and here is why" panel must be
   shown to everyone, always. → **Q-02, blocking.**
+- **Risk — the post-exit window gets described as a deadline.** The moment a screen, an exit email or a
+  support macro says "you have 90 days to download your data", we have told people a statutory right
+  expires when it does not. **This is a copy risk, and copy risks ship.** Mitigation: the closed-window
+  wording above is part of this feature's scope, not a follow-up, and the exit-time notice says "your
+  sign-in ends on <date>" — never "your data access ends". `[ASSUMPTION]` nobody outside the product team
+  writes offboarding copy that contradicts this; that assumption is worth checking with the first tenant.
+- **Risk — the window widens the exit revocation `SEC-09` exists to enforce.** A leaver keeps a working
+  credential for 90 days. Mitigation is scope, not trust: that session reaches the carve-out screen only —
+  no record view, no access log, no directory — and it is measured (`post_exit_export_requested`). If a
+  reviewer finds any other route reachable from a post-exit session, that is a blocker, not a finding.
 - **Risk — a default-off feature rots.** Nobody uses it, nobody notices when it breaks, and it decays
   between releases. Mitigation: the pilot tenants are on. If none are, kill criterion 1 has already fired.
 - **Risk — the `app.tenant_id` GUC.** 001 accepted this as open debt: the app role can set the GUC freely,
@@ -432,8 +511,9 @@ not a product.
 | **Q-02** | BA + legal | Exact wording of the standing suppression panel for confidential-case access, and when it appears | Always shown, to everyone | **Yes** |
 | **Q-03** | BA | How far back does the access log go? REQ-005 says 12 months | Confirm against audit retention config (`COMP-30`) so the screen never promises more than the data holds | No |
 | **Q-04** | Human | Is an admin flipping the setting logged, and are employees notified — **in both directions**? | **Yes, both directions.** Mirrors Part 2's requirement for the more-visible direction | No — but decide before build, it is in the scope table |
-| **Q-05** | Human | Permanent tenant **policy switch**, or temporary **staged-rollout flag**? The instruction did not say | **Policy switch.** If it is a rollout flag, this brief needs a dated default-flip | **Yes** — it changes what we tell customers and what the BA specifies |
-| **Q-06** | Human + counsel | Must the right-of-access and export path (`COMP-20`, `COMP-21`) be carved out of the switch and always available? **There is no other DSAR path anywhere in this product.** | **Carve it out.** A tenant may decide how much it narrates; it should not switch off a statutory right by leaving a default alone. `[LAW — VERIFY: DPDP Act 2023 / DPDP Rules 2025 and GDPR Arts. 15, 20 — unverified, as of 2026-08-25]` | **Yes — the biggest one** |
+| **Q-05** | Human | Permanent tenant **policy switch**, or temporary **staged-rollout flag**? The instruction did not say | **Policy switch.** If it is a rollout flag, this brief needs a dated default-flip | **RESOLVED 2026-08-26** — neither exactly: off by default indefinitely, no scheduled flip, revisited on demonstrated customer demand. See `99-decision-log.md` |
+| **Q-06** | Human + counsel | Must the right-of-access and export path (`COMP-20`, `COMP-21`) be carved out of the switch and always available? **There is no other DSAR path anywhere in this product.** | **Carve it out.** A tenant may decide how much it narrates; it should not switch off a statutory right by leaving a default alone. `[LAW — VERIFY: DPDP Act 2023 / DPDP Rules 2025 and GDPR Arts. 15, 20 — unverified, as of 2026-08-25]` | **RESOLVED 2026-08-26 — carved out.** See `99-decision-log.md` |
+| **Q-09** | — | The carve-out reached only people who can sign in, and 001 revokes access at exit | **RESOLVED 2026-08-26.** 90-day post-exit window in 002 (convenience); durable tracked request route in 003 (the obligation); the gap between them is accepted debt, owner PM, review 2026-11-30 | No |
 | **Q-07** | BA | "HR *of that person*" implies scoped HR; 001 has one unscoped HR admin column | No change in this slice (no HR screen); becomes real with the first HR console | No |
 | **Q-08** | Human | In an OFF tenant, does the product tell Aisha that her employer has turned the record view off? | **Yes** — Part 2 says a visible "this is hidden, and here is why" beats a screen pretending nothing is missing | No, but it is a values question, not a UI question |
 
@@ -480,18 +560,26 @@ access to that person's record is unaffected — checked against the Part 2 matr
 clause restates the existing default.** The switch gates the employee's view only, and it must be enforced
 server-side: off means 403, never a hidden nav item.
 
-**Open questions blocking you:**
-- **Q-06** — the `COMP-20`/`COMP-21` carve-out. Until a human and counsel answer this, you cannot specify
-  whether "Download my data" is reachable in a default tenant, and that changes the permissions matrix,
-  the acceptance criteria and the compliance section of your requirements.
-- **Q-05** — policy switch or rollout flag. It changes what the setting is called, what we tell customers,
-  and whether a dated default-flip exists.
+**Resolved since you raised them (all in `99-decision-log.md`, 2026-08-26):** **Q-05** — off by default
+indefinitely, no scheduled flip, revisited on demonstrated customer demand. **Q-06** — the right-of-access
+carve-out is accepted. **Q-09**, which you raised and which was the sharpest of the three — **the 90-day
+post-exit sign-in window is in scope for you to specify**, reaching the carve-out screen only; the durable
+tracked request route is feature 003 and the gap between them is written up here as accepted debt.
+
+**Open questions still blocking you:**
 - **Q-02** — the confidential-case suppression panel needs wording agreed with legal before the access log
   can be specified.
 
 **Open questions not blocking you:** Q-01 (own visits in own log), Q-03 (access-log window vs audit
 retention), Q-04 (log and notify on both flips — my recommendation is yes and it is in the scope table),
 Q-07 (scoped HR), Q-08 (telling employees the setting is off).
+
+**On the post-exit window, three things I want you to hold me to:** the window sits **outside** the tenant
+switch, so an ex-employee of a never-switched-on tenant still reaches the export; the closed-window message
+is **generic and identical whether or not the person ever worked there**, because a personalised one
+confirms employment history to a stranger; and no copy anywhere — screen, exit email, support macro — may
+imply the right itself expires. 90 days is my number and my reasoning is in the brief; **if you or the
+engineer can show it is wrong, say so, it is a judgement not a finding.**
 
 **Assumptions I made that you should challenge:**
 
