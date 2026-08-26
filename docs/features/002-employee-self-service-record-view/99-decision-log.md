@@ -55,3 +55,19 @@ Append only. Corrections append; they never overwrite.
 
 ### 2026-08-26 — Note from hrms-business-analyst to hrms-product-manager, non-blocking
 **The purpose assumption is only half true.** The brief asked me to confirm that a purpose is derivable from the calling code path before it is promised in the UI. It is derivable from `audit_log.action`, because `action` is a closed set our own code writes — but a purpose derived from an action reads as a restatement of the action ("Looking at your details"), not as the business purpose in the wow-moment example ("annual pay review"). `20-requirements.md` RULE-004 therefore specifies an explicit `purpose_code` recorded at each read path, from a closed seven-value list, with the action-derived text as the fallback and "Reason not recorded" plus an alert as the last resort. **If the engineer says an explicit purpose code is impractical on some path, the wow moment degrades and you need to know early.** → Q-10.
+
+### 2026-08-26 — Q-09 resolved: a post-exit window now, a tracked request route in 003
+**Raised by:** hrms-business-analyst, BLOCKING — feature 001 revokes access at exit, so the Q-06 carve-out served everyone except ex-employees, the population most likely to exercise the right.
+**Asked by the human:** time-boxed post-exit window, or an unauthenticated DPO route with a tracked clock — and what happens if the ex-employee misses the window.
+**That second question decides it.** The right of access does not expire while the company still holds the data. `[LAW — VERIFY: GDPR Art. 15, and DPDP Act 2023 / DPDP Rules 2025, as of 2026-08-26]` There is also no retention purge job yet (feature 001, not implemented), so data is held indefinitely and the right persists indefinitely. A window alone would quietly tell people their right had expired. It cannot be the mechanism.
+
+**Decision — two routes with different jobs:**
+1. **The window is convenience.** Sign-in keeps working for a defined period after exit, so the existing self-serve export covers the common case. Cheap: the login and the export already exist. **In scope for feature 002.**
+2. **The durable route is the obligation.** A tracked request that works for as long as the data is held, with identity verification and the `COMP-24` response clock. **Feature 003, not 002.**
+
+**Why not "request HR":** `COMP-20` rules it out in as many words — "Not an email address. Not an HR ticket." Not for purity: an inbox produces no clock, no audit trail and no evidence. HR still *fulfils* the request — the employer is the controller and it is their obligation — but it must land somewhere that starts a clock and escalates before breach (`COMP-24`).
+
+**The hard part, recorded so 003 does not underestimate it:** an unauthenticated route must prove who is asking without leaking. If the response differs depending on whether that person ever worked there, we have built a way to confirm anyone's employment history to any stranger — responses must be indistinguishable either way. And identity verification must not collect more sensitive data than we hold; demanding a passport to release a phone number is its own privacy problem.
+
+**ACCEPTED DEBT, stated plainly rather than left as a footnote:** until feature 003 ships, the durable route *is* the published DPO contact — which is exactly the "email address" `COMP-20` says is not good enough. This is a known, deliberate gap.
+**Owner:** hrms-product-manager to scope feature 003. **Review date: 2026-11-30.** If 003 has not shipped by then, this debt is re-raised at the next release gate rather than ageing quietly.
