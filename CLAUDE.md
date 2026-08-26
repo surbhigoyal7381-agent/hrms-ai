@@ -150,7 +150,7 @@ Several dependencies phone home by default. The disable flags live in `docs/06-t
 
 ## 8. House rules for every agent
 
-- **Plain language.** Write for Aisha and Sunil, not for an architecture review board. Short sentences. No jargon without a one-line definition on first use.
+- **Plain language (no technical jargons).** Write for Aisha and Sunil, not for an architecture review board. Short sentences. No jargon without a one-line definition on first use.
 - **Show an example.** Every rule, requirement, and finding gets a concrete example with real-looking data.
 - **Say what you do not know.** Flag assumptions as assumptions. Never state a guess as a fact. Never invent a library, an API method, a statistic, a competitor's feature, or a legal requirement — verify it or mark it unverified. Legal claims use `[LAW — VERIFY: source, as of date]`.
 - **No over-engineering.** Apply the test in `docs/02-definition-of-done.md` §Simplicity. If you cannot name what the complexity buys, remove it.
