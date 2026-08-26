@@ -114,3 +114,60 @@ REQ-031 asks for responses byte-identical *"including any nonce or token positio
 **Deferred, and why it is not this feature's work:** per-tenant database roles with RLS keyed on `current_user` are stronger, and the cost is the connection topology, not the SQL — a shared pool must be a member of every tenant role to switch into them, which re-opens the hole, so it means a pool per tenant, per-tenant credentials, role creation inside provisioning, and connection growth linear in customers. That is a platform project with its own migration and rollback plan, and **it changes the multi-tenancy model, which is a one-way door in `CLAUDE.md` §7.**
 **→ Needs the PM and the human before feature 002 ships, not after. Owner: hrms-fullstack-engineer.**
 **Residual risk recorded:** the extended-protocol lock holds only while every query goes through the wrapper — one parameterless `client.query(sql)` in the request path re-opens it, which is why the CI grep is part of the control. Migrations and the owner role are outside all of it.
+
+### 2026-08-26 — PM decision: the three locks are in feature 002's scope
+
+**Decided by:** hrms-product-manager. This is a scope and sequencing call, which is mine. **The SQL is not mine and I am not ruling on it.**
+
+**Decision: the three locks ship inside feature 002.** They are a precondition of the feature, not a follow-up to it.
+
+**Why, in the terms this brief is written in.** `10-opportunity.md` lists "zero cross-tenant exposure" as a guardrail and says in as many words that it is **not a trade-off**. The alternative on offer is to ship this product's first public endpoints with a cross-tenant escalation that is known, reachable from day one, and cheap to close. There is no version of that I can write down in a brief and defend. The measured cost is one migration line, one query wrapper, one lint rule and about fifteen lines of plpgsql — **less work than the paperwork of deferring it properly would be**, which is the engineer's argument and it is correct.
+
+**I am accepting the scope growth knowingly.** This makes feature 002 slightly bigger than the brief said. I am not cutting anything to compensate, because the locks are not a feature competing with the record view — they are the condition under which the record view is allowed to exist. `10-opportunity.md` is updated to say so rather than leaving the reader to infer it.
+
+**One thing that must not be left as it is.** Feature 001's decision log records the mitigation for this hole as *"a `SECURITY DEFINER` setter or per-tenant roles would close this"*. The engineer has now demonstrated against a real PostgreSQL 16 that **the setter alone does not close it** — plain `SET` is a utility statement and walks around a revoked `set_config`. A log entry that records a fix which does not work is worse than one that records nothing, because the next person reads it and stops looking. This is the same shape as feature 001's `hasLegalHold()` defect: a control that was believed to be in place and was not.
+**→ Action, owner hrms-fullstack-engineer: append a correction to `docs/features/001-core-hr-foundation/99-decision-log.md` pointing at this feature's findings.** Append, never edit — the wrong belief should stay visible in the history, with the correction underneath it.
+
+### 2026-08-26 — PM position on per-tenant database roles — NOT DECIDED HERE
+
+**This is a one-way door (`CLAUDE.md` §7 #1) and I am explicitly not deciding it.** `CLAUDE.md` requires the PM **and** the Full-Stack agent to sign off, and `docs/00-team-charter.md` escalates one-way doors to a human. What follows is a product position and a recommendation. It is not a decision, and nobody downstream should read it as one.
+
+**My recommendation: not now.** Three locks now; per-tenant roles assessed as a named platform project, not started under this feature's schedule.
+
+**The cost to customers, which is the part a product manager should be putting on the table.** The cost is not the SQL, it is the connection topology: a pool per tenant, credentials per tenant, role creation inside provisioning, and connection count growing linearly with customers. That is a **ceiling on how many tenants one deployment holds**, and it lands on `COST-01` (infrastructure cost per employee per month) for every customer — including the small ones who will never ask for isolation and would be paying for it. A 40-person startup tenant would carry the connection overhead of an isolation model it did not request.
+
+**The cost to the roadmap, stated as a trade rather than a worry.** The realistic competitor for this engineering time is **feature 003** — the durable tracked request route for ex-employees, which carries an accepted `COMP-20` debt with a review date of **2026-11-30**. If per-tenant roles are taken now, 003 slips and that debt ages. **I would not make that trade**, and I want it recorded that the trade is what is actually being decided, not "should our database be more secure."
+
+**What should trigger revisiting it**, and this is already half-written in feature 001's log: a customer contractually requiring isolation; **or** evidence that the CI grep is not holding in practice — a single parameterless query reaching the database outside the wrapper, found in review or in production, is the signal that the locks depend on discipline we do not have, and then roles stop being optional.
+
+**→ Needs: hrms-fullstack-engineer's countersign, and a human decision, before feature 002 ships.**
+
+**On where this decision should live.** `CLAUDE.md` §7 names `docs/99-decision-log.md` as the file where one-way doors are signed off. **That file does not exist.** Only per-feature logs do, and a one-way door recorded in `docs/features/002-…/99-decision-log.md` is a decision about the whole platform filed in a folder people stop opening once the feature ships. **Recommendation: create it, and make the human's ruling on per-tenant roles its first entry.** I have not created it myself — where cross-feature decisions live is a team-process call, not a PM artefact, and `docs/00-team-charter.md` does not assign it to anyone. It needs one line from the human saying it exists and who may append.
+
+### 2026-08-26 — Q-20 resolved: national ID is not rendered in feature 002
+
+**Decided by:** hrms-product-manager. Scope call, mine. **I agree with the engineer.**
+
+**Decision: national ID is not shown on the record view and is not a field in the export.** Not masked, not blank, not present. The engineer checked and there is no encryption code anywhere in this product, nothing reads or writes the column, and it is always `NULL` — so the choice was never "masked or unmasked", it was "show Aisha four meaningless characters, or invent envelope encryption and key management inside a feature about a read-only screen."
+
+**What Aisha sees instead: nothing at all.** Not an empty row labelled "National ID". An empty labelled row is worse than absence — it invites *"why is mine blank?"*, and the honest answer is "the field is not used yet", which is not a sentence a screen should have to carry.
+
+**The constraint I am putting on the export copy, because it is the one place this could go wrong.** The export answers a statutory right. **No wording in it may imply we hold something we do not hold, and none may imply we hold it and are withholding it.** Today the truthful statement is *not collected* — not *"held, not shown"*, and not *"contact the DPO to obtain it"*, because there is nothing to obtain. A right-of-access response is the worst possible place for a false statement about what we hold. The exact wording of `RULE-012`'s `not_included` section is the BA's; that constraint is mine. → **hrms-business-analyst.**
+
+**Nothing is lost from the ★ wow moment.** The wow is the access log — who looked, when, and why. No part of the experience spine in `10-opportunity.md` touches national ID. This costs the feature nothing a user would notice.
+
+**Two consequences recorded rather than left implied:**
+1. **`SEC-04` needs its own design and its own feature** — envelope encryption, key rotation, key management, and a separately stored non-secret "last 4" if masking is genuinely wanted. Added to the deferred table in `10-opportunity.md` with an owner. **It is not deferred silently.**
+2. **Migration 0001 line 79 asserts `SEC-04` in a comment describing a control that was never built.** An auditor reads that comment as evidence. It is the same failure mode as feature 001's green test on `hasLegalHold()`. **→ Action, owner hrms-fullstack-engineer: correct or remove that comment in this feature, since migrations are already being touched.** I am not specifying the wording; I am saying a comment claiming a control we do not have must not survive this release.
+
+### 2026-08-26 — Q-21: PM answers only the product question, and passes the mechanism back
+
+**Not my decision.** REQ-014's "same transaction" is an implementation decision with a compliance consequence. It belongs to hrms-fullstack-engineer, with hrms-techno-functional-reviewer as the gate. **I am not ruling on transactions, streaming or connection pinning, and this entry should not be cited as if I had.**
+
+**The one question that is mine — does the product promise change?** The promise is *"every time your data is accessed or exported, we record it."*
+
+**It still holds, and it holds slightly better.** Committing the audit entry **before** the first byte can only ever **over**-record: an entry may exist for an export that then failed mid-stream. It can never **under**-record. The opposite ordering has the opposite failure: data leaves the building and the trace does not survive. **From Aisha's side the promise was never "the trace and the bytes are atomic" — it is "nothing is read without a trace."** Over-recording is the safe direction, and it is the direction that keeps the promise true.
+
+**One product constraint attaches, and it is the only thing I am adding.** If an entry can exist for an export that failed, then **the access log must not present a failed export as a completed download.** Aisha reading *"you downloaded your data on 26 Aug"* for a file she never received will phone HR, and she will be right to. The engineer already records the outcome on `export_artefact`; my requirement is that whatever Aisha sees distinguishes the two. → **hrms-business-analyst** for the wording, **hrms-fullstack-engineer** for the mechanism.
+
+**Everything else about Q-21 goes back to the engineer, with the reviewer as the gate.**

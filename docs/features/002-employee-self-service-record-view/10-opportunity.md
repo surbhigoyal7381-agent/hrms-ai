@@ -307,7 +307,7 @@ Step zero is now the whole funnel, and the metrics below are restated accordingl
 | Version | Contents | Proves | Rough size |
 |---|---|---|---|
 | **Thin slice** | `apps/web` + authenticated session + one read-only route, **gated by the tenant setting and fail-closed when the setting is unset**. Current values · full change history with reason and decider · future-dated changes labelled · **who has looked at your record** · the "some things are not shown, and here is why" panel · every read writes a `sensitive_read` audit entry | Whether the access log lands or alarms, **in a tenant that opted in** | days |
-| **Recommended** ✅ | Thin slice **+** the tenant setting itself: off by default, one admin control, **the flip logged and employees notified in both directions** (Q-04) **+** the always-available export carve-out (Q-06, resolved) **+** the **90-day post-exit sign-in window** reaching the carve-out screen only (Q-09) **+** self-correction of the six allowlisted fields with a **server-side enforcing function** (closes the open MINOR from 001) **+** Download my data (JSON, `COMP-21`) **+** the events under Success metrics **+** the DPO/grievance contact in-product (`COMP-06`) **+** mobile-first at 360px, keyboard-complete, axe-clean | That it survives real use by 400 people — **and that a customer will switch it on** | weeks |
+| **Recommended** ✅ | Thin slice **+** the tenant setting itself: off by default, one admin control, **the flip logged and employees notified in both directions** (Q-04) **+** the always-available export carve-out (Q-06, resolved) **+** the **90-day post-exit sign-in window** reaching the carve-out screen only (Q-09) **+** self-correction of the six allowlisted fields with a **server-side enforcing function** (closes the open MINOR from 001) **+** Download my data (JSON, `COMP-21`) **+** the events under Success metrics **+** the DPO/grievance contact in-product (`COMP-06`) **+** **the three tenant-identity locks** — added 2026-08-26, see below **+** mobile-first at 360px, keyboard-complete, axe-clean | That it survives real use by 400 people — **and that a customer will switch it on** | weeks |
 | **Everything asked for** | The above **+** directory and org chart (REQ-007) · HR admin UI for creating and changing employees (REQ-002) · bulk import (REQ-008) · correction *requests* for locked fields with a response clock · change notifications (needs a queue) · document vault · manager view of the team · full Rights Centre (erasure request, consent withdrawal) · native mobile app | — | — |
 
 **Recommended: the middle option.** It is roughly a third of "employee self-service" as normally
@@ -363,6 +363,8 @@ in logs or events.
 | Erasure request and consent withdrawal in the Rights Centre (`COMP-12`, `COMP-22` user-facing) | before the first paying enterprise tenant | PM |
 | Retention purge job actually running (`COMP-31`) — carried from 001 | before the first tenant with an ex-employee past the statutory window | Full-Stack |
 | Scoped HR ("HR *of that person*") rather than tenant-wide HR admin | with the first HR-facing screen | BA |
+| **Application-layer encryption for identity fields (`SEC-04`)** — envelope encryption, key rotation, key management, and a separately stored non-secret "last 4" if masking is wanted. **It does not exist today**, so national ID is not rendered or exported in this feature (Q-20). **No copy anywhere may imply we hold it** | before any field claiming `SEC-04` is populated or rendered | Full-Stack |
+| **Per-tenant database roles** — the durable fix for the tenant-identity hole. A one-way door; my position is "not now", and it is **not decided** | human decision required **before 002 ships** | Full-Stack + human |
 
 ## Simplicity gate (`docs/02-definition-of-done.md` §Gate 0)
 
@@ -484,10 +486,26 @@ is an argument for shortening it, and `SEC-09` would welcome that.
   reviewer finds any other route reachable from a post-exit session, that is a blocker, not a finding.
 - **Risk — a default-off feature rots.** Nobody uses it, nobody notices when it breaks, and it decays
   between releases. Mitigation: the pilot tenants are on. If none are, kill criterion 1 has already fired.
-- **Risk — the `app.tenant_id` GUC.** 001 accepted this as open debt: the app role can set the GUC freely,
-  so any SQL-injection defect escalates to a full cross-tenant breach. **Until this feature there was no
-  HTTP endpoint to inject into.** The debt goes from theoretical to reachable on the day this ships. Fixing
-  it is not this brief's call; saying it out loud is. → raise with the Full-Stack agent.
+- **Risk — the `app.tenant_id` hole. NOW IN SCOPE, updated 2026-08-26.** 001 accepted this as open debt:
+  the application's database role can freely set the variable that every row-level security policy trusts,
+  so any injection defect anywhere becomes a full cross-tenant breach. **Until this feature there was no
+  HTTP endpoint to inject into. This feature ships the endpoints.**
+  Two things changed since the first draft of this brief. First, the engineer tested feature 001's recorded
+  mitigation against a real PostgreSQL 16 and **it does not work** — the `REVOKE` reports success, creates
+  no permission row, and the role sets the variable anyway; and a `SECURITY DEFINER` setter on its own is
+  walked around by a plain `SET`. Second, the mitigation that does work is small: three locks, costing a
+  migration line, a query wrapper, a lint rule and about fifteen lines of database function.
+  **Decision (PM, scope and sequencing): the three locks ship inside feature 002.** This brief lists "zero
+  cross-tenant exposure" as a guardrail and says it is not a trade-off; shipping the first public endpoints
+  with a known, reachable escalation would contradict that in the same document. The feature grows slightly
+  and I am accepting that knowingly — the locks are not a competing feature, they are the condition under
+  which the record view is allowed to exist. Recorded in `99-decision-log.md`.
+  **Still open, and not mine:** per-tenant database roles are the stronger, durable fix. They change the
+  multi-tenancy model, which is a one-way door (`CLAUDE.md` §7 #1). **My position is "not now"** — the cost
+  is connection topology growing with every customer, which lands on `COST-01` for small tenants who never
+  asked for isolation, and the realistic competitor for that engineering time is feature 003 and its dated
+  `COMP-20` debt. **It needs the engineer's countersign and a human decision before this ships**, and it
+  needs somewhere to live: `CLAUDE.md` §7 names `docs/99-decision-log.md` and that file does not exist yet.
 - **Open MINOR from 001 that this feature must close:** `SELF_CORRECTABLE` is an allowlist with no
   enforcing function. REQ-006 requires a 403 at the API, never a hidden field in the UI.
 - `[ASSUMPTION]` Employees will self-correct if allowed to. Still untested, carried forward from 001.
