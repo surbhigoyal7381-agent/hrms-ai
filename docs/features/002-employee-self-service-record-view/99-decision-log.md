@@ -31,3 +31,14 @@ Append only. Corrections append; they never overwrite.
 - Treat it as the current default with a named revisit condition, not as settled forever.
 **What we must therefore measure:** demand has to be observable or the revisit trigger can never fire. Tenant activation, deactivations with reasons, and requests for the feature are the evidence. The metric in `10-opportunity.md` already reports activation as the leading indicator; that is now load-bearing rather than informational.
 **Open:** what counts as "enough demand" is not defined, and deliberately so. **Owner: the human.**
+
+### 2026-08-26 — Future-dated changes stay visible; no hiding switch
+**Raised by:** the human — the worry that some employers will not want employees seeing scheduled changes in advance, to avoid disturbance.
+**Decision:** **option A. Nothing is hidden.** If a change is in the record, the person it is about can see it, immediately. No second setting, no delay window, no per-change suppression. This reaffirms feature 001's Q-04 rather than reopening it.
+**Why the employer's worry is real but is not solved by hiding:** what a manager usually wants is to deliver the news personally, which is decent management. The fix is *when the change gets written*, not *who can see it*. A reorg still being sketched is a plan, not a change to Aisha's job. Once it is committed to her record as effective-dated, the company has decided, and she sees it. So: keep planning in the planning stage; write to the record when it is real.
+**Charter position:** `docs/07-fairness-and-transparency.md` Part 2 lists the legitimate limits — promised anonymity, small groups, ongoing investigations, other people's data, genuine security. A pending reorg is none of them. Part 2 also names what never counts, including "it might increase attrition". "To avoid disturbance" sits close enough to that line that hiding would have been a standing review finding.
+**The case that decided it:** if future-dated changes were hideable, a company could record an employee's **exit date** while that person could not see it. That fails the Part 3 overriding test — would we be comfortable explaining it, in plain language, to the person it operates on.
+**Rejected alternatives, recorded so they are not re-argued from scratch:**
+- *A bounded "let the manager tell them first" delay* — days not indefinite, logged, visible after the fact, never for exit dates. Acceptable if a customer pushes hard. Not built now; no customer has asked.
+- *Employer-controlled indefinite hiding* — would have required overruling this charter section and feature 001's Q-04 on the record. Not taken.
+**Consequence for the build:** no new setting to design or test. The requirement is the existing one — future-dated changes are shown, labelled with when they take effect.
