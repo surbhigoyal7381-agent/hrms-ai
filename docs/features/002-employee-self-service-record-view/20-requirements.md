@@ -430,15 +430,42 @@ GIVEN a test renders the access log for a person with suppressed entries and
       cannot be made, the feature is not shippable)
 
 GIVEN the panel is shown
- THEN its wording is the string agreed under Q-02 with legal — the draft in the
-      microcopy table is NOT approved wording
+ THEN it renders the four strings access.confidential_panel.heading, .body,
+      .invariant and .action, resolved from the tenant's market with the
+      default set as the fallback
+  AND an unrecognised market resolves to the DEFAULT set, never to no panel
+      (fail closed — an absent panel is the leak)
+
+GIVEN the access log is rendered in any state
+ THEN the panel sits immediately after the heading and window note, ABOVE the
+      first entry, in the same DOM position every time
+  AND it is present on first paint, not loaded after the entries
+  AND its body is expanded, not collapsed behind a control
+
+GIVEN a "Why is this here?" link exists
+ WHEN it is opened
+ THEN hidden_data_explainer_opened is emitted with an EMPTY payload — an
+      interaction signal that differed by state would defeat the panel
+
+GIVEN a tenant that has never had a case, so nothing is suppressed anywhere
+ THEN the panel is STILL rendered, on every access log, from the first release
+      (see the note below — introducing it later is itself the leak)
+
+GIVEN an entry is suppressed
+ THEN a suppression record exists with subject, actor scope, reason, owner and
+      a review date, per RULE-014
+  AND no entry is suppressed without one (fail closed the other way: an entry
+      with purpose_code = case_handling and NO suppression record is a defect,
+      and it is alerted, not silently hidden)
 ```
 
-NFRs: `PRIV-08`, `SEC-01`, `A11Y-05`, `COMP-53`.
+NFRs: `PRIV-08`, `SEC-01`, `A11Y-05`, `I18N-01`, `OBS-04`, `COMP-53`.
 Compliance: `docs/05-compliance-catalog.md` §3 Cases/POSH — "complainant protection from
-access-log exposure". Charter Part 2 — "ongoing investigations" is a legitimate limit, and the
-limit itself must be visible.
-**Q-02 is still open and it blocks this requirement's copy, not its behaviour.**
+access-log exposure". Charter Part 2 — "ongoing investigations" is a legitimate limit, **and it
+must be time-boxed, audited, with the scope recorded** (RULE-014), and the limit itself must be
+visible.
+**Q-02: the wording is now drafted and the build is unblocked. The strings are marked DRAFTED, NOT
+LEGALLY APPROVED and need counsel sign-off, per market, before release.**
 
 ---
 
@@ -1596,8 +1623,31 @@ same ARIA labels, same ordering. Also assert that entry counts, response size cl
 panel. Rohan has 4 human entries and 2 suppressed. He sees 4 entries and the **identical** panel.
 Neither can tell which of them is which.
 
-**Wording: `[NEEDS LEGAL VERIFICATION]` — Q-02, inherited from the PM, still open.** The draft in
-the microcopy table is a placeholder for the legal-agreed string and must not ship as written.
+**Where it sits, and why the position is fixed.** Immediately after `access.heading` and
+`record.window_note`, **above** `access.humans.heading` and above the first entry. Three
+consequences, all testable:
+
+- It is in the same DOM position on every render, in every state. It is not appended after the
+  list, where its offset would vary with the number of entries.
+- It is **rendered on first paint, never lazily and never after the entries load.** A panel that
+  arrives a moment later on some records is a timing signal (REQ-031's argument, applied here).
+- **Its body is always visible — it is not collapsed by default.** A "Show more" affordance that
+  some people expand produces an interaction signal. The existing `hidden_data_explainer_opened`
+  event may only be emitted from an optional *"Why is this here?"* link that opens a longer
+  explanation, and its payload stays empty (`{}`), for the same reason
+  `closed_window_dpo_contact_opened` does.
+
+**Wording: DRAFTED, NOT LEGALLY APPROVED — Q-02 remains open.** The four strings are in the
+microcopy section and the build may proceed against them. **They must not ship to a live tenant
+until counsel has signed them off, per market**, and the same applies to each translation. The
+behaviour above is not blocked by that.
+
+**The panel ships before there is anything to suppress, and that is the point.** No Cases module
+exists in this product, so nothing writes `purpose_code = case_handling` today and no access log
+currently suppresses anything. **The panel is still required from day one.** If it were introduced
+later, alongside the Cases module, then its *first appearance* would announce that suppression had
+begun — which is the same defect as a conditional panel, spread over releases instead of over
+users. Shipping it into an empty state is what makes it silent later.
 
 ---
 
@@ -1714,6 +1764,111 @@ window a day early for someone in India.
 
 Parameters: `post_exit_window_days` = **90**, product-wide, with the reasoning recorded in
 `10-opportunity.md` and the decision log. Not a tenant setting in v1.
+
+---
+
+### RULE-014 — The suppression itself: time-boxed, audited, scope recorded
+
+RULE-010 says a `case_handling` entry is not rendered. That is only half of what the charter
+permits. Part 2's exact words are: *"Ongoing investigations. Premature disclosure endangers
+complainants. **Time-boxed, audited, with the scope of the exception recorded.**"* All three
+qualifiers are load-bearing. **A suppression with no expiry, no record and no owner is not the
+permitted exception — it is the covert thing Part 3 refuses to build.**
+
+#### What must exist before an entry may be suppressed
+
+A suppression is never a loose flag on an audit row. It derives from a **suppression record**, and
+no entry is hidden without one.
+
+| Field | Required | Notes |
+|---|---|---|
+| `case_ref` | yes | the case this belongs to |
+| `subject_person_id` | yes | **whose access log is affected** — the scope, stated as data |
+| `actor_scope` | yes | which actors' reads are suppressed. Named handlers, not "all HR" |
+| `opened_at`, `opened_by`, `opened_by_name` | yes | accountability, denormalised like `decided_by_name` |
+| `reason` | yes, non-empty | why this scope, in words. Same `NOT NULL` rule as every other decision about a person |
+| `review_due` | yes | `opened_at + case_suppression_review_days` (default **90**) |
+| `reaffirmed_at`, `reaffirmed_by` | on each review | append-only; a review is a new row, not an edit |
+| `closed_at`, `closed_by`, `closure_disclosure_decision` | on closure | see below |
+
+#### What "time-boxed" means here, precisely
+
+```
+GIVEN a suppression opened on 2026-09-01 with review_due 2026-11-30
+ WHEN 2026-11-30 passes with no reaffirmation
+ THEN the entries STAY SUPPRESSED
+  AND an alert fires to the DPO and the case owner
+  AND the suppression appears on an overdue-review queue
+  AND the overdue state is itself recorded and reportable
+```
+
+**It does not auto-reveal on expiry, and that is deliberate.** Dumping an investigator's name into
+a respondent's access log because somebody missed a calendar reminder would endanger exactly the
+person the rule protects. **So it cannot become permanent silently — it becomes permanent
+loudly.** The failure mode is an alert and a queue entry, never a disclosure and never silence.
+
+**Who can close it:** the case owner or the DPO. Not the subject's manager, not HR generally, and
+never the subject. Closure requires a reason and is audited.
+
+**Worked example.** A grievance is raised on 2026-09-01 naming Rohan. A suppression record is
+opened: subject `Rohan`, actor scope `{Meera Nair, external investigator}`, reason *"Complainant
+protection while the grievance is investigated"*, review due 2026-11-30. From that moment Rohan's
+access log omits reads by those two actors. The panel on his screen is unchanged, because it was
+already there. On 2026-10-20 the case closes; the DPO records a closure decision. On 2026-11-30,
+had it still been open and unreviewed, Meera and the DPO would both have been alerted and the case
+would sit on the overdue queue until a human acted.
+
+#### After the case closes — does the person get told?
+
+**This is a values question with a legal edge, and I am not deciding it silently.** Three options,
+and only one of them is defensible as a silent default:
+
+| Option | What the person sees after closure | Why not |
+|---|---|---|
+| **(a) Never tell** | Nothing, ever | Fails Part 3's overriding test. We would be unable to explain it, in plain language, to the person it operated on. **Rejected** |
+| **(b) Tell and name** | The suppressed entries appear in full — names, dates, purpose | Names the investigator. In a team of six that identifies the complainant, and the retaliation risk outlives the case by years. Part 2: the more vulnerable person's privacy wins |
+| **(c) Tell, unnamed** ✅ | *"Your record was accessed as part of a confidential process. That process has now closed."* — with dates and a purpose label, **without the actors' names** | Gives the person the true fact they are owed without re-identifying the complainant |
+
+**My recommendation: (c) as the default, decided per case at closure by the DPO, with (b)
+available where counsel says the law requires it, and (a) available only with a written reason
+that is itself audited and reviewable.** So `closure_disclosure_decision` is one of
+`unnamed` (default) · `named` · `withheld`, and `withheld` requires a non-empty reason — which
+stops it becoming the lazy default.
+
+**The case against my own recommendation, stated rather than buried.** Option (c) still tells
+somebody that a confidential process involved them. A respondent who was never approached —
+because an inquiry concluded there was nothing to answer — would learn for the first time that an
+allegation existed. That is a real harm, it is not hypothetical, and it is why the decision is
+per-case rather than automatic. **`[ASSUMPTION]` that a per-case DPO decision is the right control
+point rather than a blanket policy.**
+
+**→ This needs the human, and counsel.** It is **Q-18**, and it is **not blocking feature 002**,
+because the Cases module does not exist here and nothing writes a suppression record yet. It must
+be settled before the Cases module ships, not after.
+
+#### Market note — where I am not confident
+
+I could not verify any of the following against a primary source, and I am not counsel.
+
+- **India.** `[LAW — VERIFY: the Sexual Harassment of Women at Workplace (Prevention, Prohibition
+  and Redressal) Act 2013 is widely described as requiring confidentiality of the parties and
+  contents of proceedings, with a penalty for breach. How that interacts with a data-principal
+  access request under the DPDP Act 2023 and DPDP Rules 2025 — which takes precedence, and whether
+  an access-log entry counts as "contents of proceedings" — is unverified, as of 2026-08-26.]`
+- **EU.** `[LAW — VERIFY: GDPR Art. 15(4) provides that the right to obtain a copy shall not
+  adversely affect the rights and freedoms of others, and Art. 23 permits Member State
+  restrictions. Whether withholding access-log entries — as distinct from the case file itself —
+  falls within either, and whether it differs by Member State, is unverified, as of 2026-08-26.]`
+- **UK.** `[LAW — VERIFY: the Data Protection Act 2018 sets out exemptions in its schedules,
+  including ones relevant to negotiations and third-party data. Whether any covers this is
+  unverified, as of 2026-08-26.]`
+- **Whether a respondent has a right to be told an investigation took place at all** is often
+  driven by employment law rather than data-protection law, and I have verified nothing about it in
+  any market.
+
+**Not in our deployment regions today, so out of scope but named so it is not forgotten:** CCPA /
+CPRA applies to employees in California, and would need this question re-asked before any US
+deployment.
 
 ---
 
@@ -2313,17 +2468,84 @@ interpolated values; dates inside them are already locale-formatted per RULE-009
 `access.coverage_note` is not optional politeness. It is the honesty guardrail: the promise this
 screen makes is *access through this product*, not *everyone who has ever seen your data*.
 
-### The standing confidential-access panel — **DRAFT, needs legal sign-off (Q-02)**
+### The standing confidential-access panel
 
-| Key | Draft string |
+> ## ⚠ DRAFTED, NOT LEGALLY APPROVED
+> **These four strings need counsel sign-off before release.** I am a business analyst, not a
+> lawyer. The wording below is drafted to be defensible so the build is not blocked, and it is
+> written against `docs/07-fairness-and-transparency.md` Part 2 and
+> `docs/05-compliance-catalog.md` §3 — **not** against any statute I have verified.
+> `CLAUDE.md` §6 requires human legal sign-off on anything that reaches a regulator, and this
+> panel is the sentence a regulator would read first in a complaint about a suppressed access
+> record. **Q-02 stays open until counsel signs it.**
+
+| Key | Exact string (en-IN source, **drafted**) |
 |---|---|
-| `access.confidential_panel` | `Some kinds of access aren't listed here. If your organisation is handling a confidential matter — for example a complaint, an investigation or a legal process — the people working on it don't appear in this list, whether or not that applies to you. This wording is the same for everyone.` |
+| `access.confidential_panel.heading` | `Not everything is listed here` |
+| `access.confidential_panel.body` | `One kind of access is never shown in anyone's record: confidential casework. If someone raises a concern, the people looking into it are not listed. That protects the person who raised it.` |
+| `access.confidential_panel.invariant` | `This note appears on everyone's record, every time. It does not tell you whether anything has been left out of yours.` |
+| `access.confidential_panel.action` | `To get a copy of your record, use Download my data. If you have a question about your data, contact {dpo_name} at {dpo_email}.` |
 
-**Three things about that last sentence, and they are the requirement, not the style.**
-It is shown to everyone, always. It says the same thing to a person with suppressed entries and a
-person with none. And it says *"whether or not that applies to you"* explicitly, so a reader cannot
-treat the panel's presence as information. **Do not ship this string until legal has agreed it
-(Q-02).** The behaviour in REQ-007 and RULE-010 is not blocked by the wording.
+#### Why each sentence is the way it is
+
+The panel is read by two people at once: somebody with nothing hidden, and somebody under
+investigation. Every sentence has to be true and unremarkable to both.
+
+| Sentence | What it is doing |
+|---|---|
+| `Not everything is listed here` | Part 2's rule — a visible *"this is hidden, and here is why"* beats a screen pretending nothing is missing. Stated first, so nobody discovers it by inference |
+| `One kind of access is never shown in anyone's record: confidential casework.` | **"One kind"** is a factual claim tied to the code: today exactly one suppression rule exists (`purpose_code = case_handling`, RULE-010). If a second category is ever added, this string changes with it. **"in anyone's record"** does the ambiguity work — it is a statement about the system, not about the reader |
+| `If someone raises a concern, the people looking into it are not listed.` | Names the reason without naming the reader. The grammatical subject is *someone* and *the people looking into it* — never *you*. A respondent cannot read themselves into it |
+| `That protects the person who raised it.` | The sympathetic reason, and the one that stops the ordinary reader hearing a cover-up. It centres the complainant, which is also who Part 2 says wins when privacy and transparency collide |
+| `This note appears on everyone's record, every time.` | The invariant, stated to the reader. Makes the panel's presence worthless as a signal |
+| `It does not tell you whether anything has been left out of yours.` | **The load-bearing sentence, and the one I rewrote most.** An earlier draft said *"it is not about your record"* — which is a **lie to a respondent**, who does have something suppressed. This version is true in both states: it makes a claim about what can be *inferred*, not about what is *there* |
+| `To get a copy of your record, use Download my data…` | `UX-04`'s next step, and `COMP-06`'s contact. **Deliberately does not say "everything we hold"** — the export suppresses the same entries, so "everything" would be false. It also does not promise she can find out what was withheld, because during a live case she cannot |
+
+#### What the wording deliberately does not do
+
+- **It does not list examples.** The earlier draft said *"for example a complaint, an investigation
+  or a legal process"*. Three loaded nouns in a row is what made it read as sinister to the 99% who
+  have nothing hidden, and it invites a reader to work out which one applies to them.
+- **It does not promise a right we cannot deliver.** No "you can ask to see what was hidden". During
+  an open case that request is refused, and a promise that gets refused is worse than no promise.
+- **It does not say "legal", "lawful", "we are required to", or "under applicable law".** Those
+  phrases assert a legal position I have not verified, and they are the first thing a regulator
+  would ask us to substantiate.
+- **It does not apologise or reassure.** *"Don't worry, this probably doesn't apply to you"* would be
+  a statement about the reader's record and a lie to half its readers.
+
+#### Translation risks — flag before any locale ships
+
+Four phrases carry meaning in English that a literal translation will not preserve (`I18N-01`,
+`I18N-02` house rules; these are for the translator's brief, not the engineer's):
+
+| Phrase | The risk |
+|---|---|
+| `confidential casework` | "Casework" has no clean single-word equivalent in several languages and translates as "file work" or "social work". **Translate the concept — confidential handling of a raised concern — not the word.** |
+| `raises a concern` | Deliberately broader than *complaint*, *grievance* or *charge*, each of which is a defined legal term in at least one of our markets. A literal translation may narrow it to a formal filing and make the sentence false for informal reports. **The translator must be told it is intentionally the widest term.** |
+| `the people looking into it` | Idiomatic. Translating it as *investigators* or *the investigating authority* makes the sentence sound formal and accusatory, which is the tone this panel exists to avoid |
+| `left out of yours` | Elliptical — *yours* refers back to *record*. Several languages cannot carry the ellipsis and will need the noun repeated. **Repeating it is fine; losing it is not, because that sentence is the invariant** |
+
+**Rule for translators:** these four strings are reviewed as a set, by a human, against the intent
+above. They are not sent to bulk machine translation, and the reviewed translation needs the same
+counsel sign-off as the English (`Q-02` applies per locale, not once).
+
+#### Per-market variants
+
+This is **not one string that works everywhere.** Jurisdictions differ on how much a person under
+investigation must be told and when. The panel is therefore a **per-market string set with a
+default**, resolved from the tenant's market, exactly like every other rule in this document
+(`CLAUDE.md` §6 — design the capability, not the jurisdiction).
+
+| Market | Status |
+|---|---|
+| Default (used when no market override exists) | The four strings above |
+| India | **Not confident.** Uses the default until counsel reviews it. See RULE-014's market note |
+| EU | **Not confident.** Uses the default until counsel reviews it |
+| UK | **Not confident.** Uses the default until counsel reviews it |
+
+Parameter: `confidential_panel_string_set`, resolved per market, defaulting to the set above.
+**Fail closed:** an unrecognised market resolves to the default, never to no panel.
 
 ### Self-correction
 
@@ -2373,7 +2595,7 @@ pre-ticked box, no "recommended" badge, no countdown (charter Part 3, dark patte
 | `export.async` | `Your file is large, so we're preparing it in the background. We'll tell you when it's ready.` |
 | `export.failed` | `We couldn't finish your download. Nothing has been shared and nothing is lost — try again, or use "Ask about your data".` |
 | `export.ratelimited` | `You've asked for this a few times in the last hour. Try again after {time}.` |
-| `export.contents_note` | `This is everything we hold about you, including your history and the access list, even the parts not shown on this screen.` |
+| `export.contents_note` | `This is your record — your details, every change, and the access list — including the parts that aren't shown on this screen.` |
 | `dpo.heading` | `Ask about your data` |
 | `dpo.body` | `{name} looks after data protection at {company}. Write to {email}. They aim to reply within {days} days.` |
 | `dpo.unconfigured` | `Your organisation hasn't listed a contact for data questions yet. Write to {fallback} and we'll route it.` |
@@ -2525,7 +2747,7 @@ The PM raised Q-01 to Q-08 in `10-opportunity.md`. Q-05 and Q-06 were resolved b
 | # | Question | Answer |
 |---|---|---|
 | **Q-01** | Is Aisha's own visit excluded from her access log, or shown as "you"? | **Shown as "You"**, grouped to one line per calendar day so the log does not fill with her own name (RULE-006). A log with silent exclusions is not a log |
-| **Q-02** | Wording of the standing suppression panel, and when it appears | **Behaviour specified: always, to everyone, byte-identical** (REQ-007, RULE-010). **Wording still open — needs legal.** The draft in the microcopy table is a placeholder. **Blocking the copy, not the build** |
+| **Q-02** | Wording of the standing suppression panel, and when it appears | **Behaviour specified: always, to everyone, byte-identical** (REQ-007, RULE-010) — and now **the wording is drafted** (four keyed strings, per-market with a default). **The build is unblocked. The strings are DRAFTED, NOT LEGALLY APPROVED and still need counsel sign-off per market before release.** Not closed |
 | **Q-03** | How far back does the access log go? | **`min(display window, actual audit retention)`, and the screen states the window it is showing** (RULE-007). Default display window 365 days. The screen never promises more than the data holds |
 | **Q-04** | Is a flip logged, and are employees notified in both directions? | **Yes, both** (REQ-015). One exception, specified: `unset → off` sends no notice, because nothing was withdrawn |
 | **Q-05** | Policy switch or rollout flag? | Resolved by the human: off by default indefinitely, revisited on demonstrated demand. **No dated default-flip is specified anywhere in this document** |
@@ -2544,7 +2766,8 @@ Each is addressed to a named agent or role and marked blocking or not.
 | # | To | Question | My assumption / recommendation | Blocking? |
 |---|---|---|---|---|
 | **Q-09** | — | **RESOLVED 2026-08-26** (`99-decision-log.md`, "Q-09 resolved: a post-exit window now, a tracked request route in 003"). A **90-day post-exit sign-in window** is in scope for this feature, reaching the carve-out screen only and sitting outside the tenant switch — REQ-022, REQ-031, RULE-013. The durable tracked request route is **feature 003**. The gap between them is accepted debt: until 003 ships, the durable route is the published DPO inbox, which `COMP-20` explicitly rules out. **Owner: PM. Review 2026-11-30.** | — | **No longer blocking** |
-| **Q-02** | Legal | Exact wording of the standing confidential-access panel | Draft in the microcopy table; behaviour already specified | **YES** for the copy. Not for the behaviour |
+| **Q-02** | Counsel, per market | Sign off the four confidential-panel strings, and each locale's translation. **Drafted 2026-08-26 so the build is not blocked; not approved by anybody qualified.** Specifically: is it lawful, in India, the EU and the UK, to withhold access-log entries from a data-subject access request on ongoing-investigation grounds, and does the wording need to differ by market? | Ship the default set behind a per-market parameter; do not ship to a live tenant until signed | **No longer blocking the build. BLOCKING RELEASE.** Not closed |
+| **Q-18** | Human + counsel | **After a case closes, is the person told that something had been suppressed — and are the actors named?** Three options in RULE-014 | **(c) tell, unnamed**, as the default, decided per case at closure by the DPO; `named` where counsel says the law requires it; `withheld` only with a written, audited reason. Never a silent permanent suppression | No — the Cases module does not exist here. **Must be settled before it ships** |
 | **Q-10** | PM | Is the seven-value purpose list enough for v1 — `pay_review`, `payroll_run`, `record_correction`, `onboarding`, `case_handling`, `employee_request`, `support`? | Yes for v1. A missing purpose degrades gracefully to "Reason not recorded" plus an alert, so a wrong guess is recoverable | No |
 | **Q-11** | Counsel | Does a **masked** national identifier satisfy the right to obtain a copy of one's own data? | Mask on screen and in the export; full value via the DPO route | Blocking **release sign-off**, not the build |
 | **Q-12** | Full-Stack | `audit_log.actor_id` is written from `Principal.actorId`; `erasure.ts` matches it against `employment.id`. Are they the same value? If not, **erasure already misses the audit log and the transparency ledger today** | They must be one value, or the erasure queries need a join. Please check before building the access log on top of it | **YES** — it is a latent `COMP-22` defect in shipped code, not just a question about this feature |
@@ -2595,7 +2818,8 @@ Marked so they can be challenged rather than inherited.
 ## Handoff
 
 **To:** hrms-fullstack-engineer, then hrms-test-automation
-**Ready:** yes, for everything except REQ-021 and the copy of REQ-007
+**Ready:** yes, for everything except REQ-021. REQ-007 is now buildable — its copy is drafted, and
+it is release that waits on counsel, not you
 
 **Open questions blocking you:**
 
@@ -2606,13 +2830,22 @@ Marked so they can be challenged rather than inherited.
   and the access log is about to be built directly on top of it.
 - **Q-13** — how a correcting ledger entry supersedes the original for display, without breaking
   append-only. Blocks REQ-021 only.
-- **Q-02** — the confidential-panel wording. Build the behaviour, leave the string keyed and
-  swappable.
+**Nothing else blocks you.**
 
-**Resolved since I raised it: Q-09.** The 90-day post-exit window is now specified and in scope —
-REQ-022, REQ-031, RULE-013. Read the next block before you build it.
+**Resolved since I raised them:**
 
-**Open questions not blocking you:** Q-10, Q-11, Q-14, Q-15, Q-16, Q-17.
+- **Q-09.** The 90-day post-exit window is specified and in scope — REQ-022, REQ-031, RULE-013.
+  Read the next block before you build it.
+- **Q-02.** The confidential-panel wording is **drafted** — four keyed strings, per-market with a
+  default, in the microcopy section. **Build against them.** They are marked *DRAFTED, NOT LEGALLY
+  APPROVED*: they need counsel sign-off per market, and each translation needs it too, before the
+  feature reaches a live tenant. Keep them keyed and swappable, resolve the set from the tenant's
+  market, and **fail closed to the default set — an unrecognised market must never render no
+  panel.** RULE-014 is new and comes with it: a suppression needs a record with a scope, an owner,
+  a reason and a review date, and an entry marked `case_handling` with no suppression record is a
+  defect that alerts rather than a row that quietly disappears.
+
+**Open questions not blocking you:** Q-10, Q-11, Q-14, Q-15, Q-16, Q-17, Q-18.
 
 **★ The post-exit window is an exception to exit revocation, not a change to it.**
 
