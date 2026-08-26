@@ -79,7 +79,7 @@ describe('cross-tenant reads', () => {
   it('tenant A sees none of tenant B rows, in EVERY tenant-scoped table', async () => {
     for (const table of TENANT_SCOPED) {
       const col = table === 'tenant' ? 'id' : 'tenant_id';
-      const rows = await withTenant(app, { tenantId: A.tenantId, actorId: A.hrId }, async (tx) => {
+      const rows = await withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
         const r = await tx.query(`SELECT ${col} AS t FROM ${table}`);
         return r.rows;
       });
@@ -92,7 +92,7 @@ describe('cross-tenant reads', () => {
   it('tenant A cannot see tenant B in the tenant registry itself', async () => {
     // The customer list is not public data, and `region` carries the COMP-40
     // residency decision.
-    const rows = await withTenant(app, { tenantId: A.tenantId, actorId: A.hrId }, async (tx) => {
+    const rows = await withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
       const r = await tx.query(`SELECT id, name FROM tenant`);
       return r.rows;
     });
@@ -102,7 +102,7 @@ describe('cross-tenant reads', () => {
 
   it('the app role cannot rewrite another tenant residency region', async () => {
     await expect(
-      withTenant(app, { tenantId: A.tenantId, actorId: A.hrId }, async (tx) => {
+      withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
         await tx.query(`UPDATE tenant SET region = 'eu' WHERE id = $1`, [B.tenantId]);
       }),
     ).rejects.toThrow(/permission denied/i);
@@ -111,7 +111,7 @@ describe('cross-tenant reads', () => {
   it('fetching tenant B employment by its exact id from tenant A returns nothing', async () => {
     // Must be indistinguishable from "does not exist" — a 403 would confirm
     // the record exists, which is itself a leak.
-    const rows = await withTenant(app, { tenantId: A.tenantId, actorId: A.hrId }, async (tx) => {
+    const rows = await withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
       const r = await tx.query(`SELECT * FROM employment WHERE id = $1`, [B.employmentId]);
       return r.rows;
     });
@@ -119,7 +119,7 @@ describe('cross-tenant reads', () => {
   });
 
   it('the same query in tenant B does find it — proving the test is meaningful', async () => {
-    const rows = await withTenant(app, { tenantId: B.tenantId, actorId: B.hrId }, async (tx) => {
+    const rows = await withTenant(app, { tenantId: B.tenantId, actorEmploymentId: B.hrEmploymentId }, async (tx) => {
       const r = await tx.query(`SELECT * FROM employment WHERE id = $1`, [B.employmentId]);
       return r.rows;
     });
@@ -130,7 +130,7 @@ describe('cross-tenant reads', () => {
 describe('cross-tenant writes', () => {
   it('cannot insert a row carrying another tenant id', async () => {
     await expect(
-      withTenant(app, { tenantId: A.tenantId, actorId: A.hrId }, async (tx) => {
+      withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
         await tx.query(
           `INSERT INTO person (tenant_id, legal_name) VALUES ($1, 'Injected')`,
           [B.tenantId],
@@ -140,7 +140,7 @@ describe('cross-tenant writes', () => {
   });
 
   it('cannot update another tenant row', async () => {
-    const updated = await withTenant(app, { tenantId: A.tenantId, actorId: A.hrId }, async (tx) => {
+    const updated = await withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
       const r = await tx.query(
         `UPDATE employment SET employee_number = 'HACKED' WHERE id = $1`,
         [B.employmentId],
@@ -149,7 +149,7 @@ describe('cross-tenant writes', () => {
     });
     expect(updated).toBe(0);
 
-    const still = await withTenant(app, { tenantId: B.tenantId, actorId: B.hrId }, async (tx) => {
+    const still = await withTenant(app, { tenantId: B.tenantId, actorEmploymentId: B.hrEmploymentId }, async (tx) => {
       const r = await tx.query(`SELECT employee_number FROM employment WHERE id = $1`, [B.employmentId]);
       return r.rows[0].employee_number;
     });
@@ -157,7 +157,7 @@ describe('cross-tenant writes', () => {
   });
 
   it('cannot delete another tenant row', async () => {
-    const deleted = await withTenant(app, { tenantId: A.tenantId, actorId: A.hrId }, async (tx) => {
+    const deleted = await withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
       const r = await tx.query(`DELETE FROM person WHERE tenant_id = $1`, [B.tenantId]);
       return r.rowCount;
     });
@@ -190,14 +190,14 @@ describe('fail-closed: an unset tenant context yields ZERO rows, never all rows'
 
 describe('audit log immutability (COMP-53)', () => {
   it('the app role can INSERT into audit_log', async () => {
-    await withTenant(app, { tenantId: A.tenantId, actorId: A.hrId }, async (tx) => {
+    await withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
       await tx.query(
         `INSERT INTO audit_log (tenant_id, actor_id, action, resource_type, resource_id)
          VALUES ($1,$2,'test.write','employment',$3)`,
-        [A.tenantId, A.hrId, A.employmentId],
+        [A.tenantId, A.hrEmploymentId, A.employmentId],
       );
     });
-    const n = await withTenant(app, { tenantId: A.tenantId, actorId: A.hrId }, async (tx) => {
+    const n = await withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
       const r = await tx.query(`SELECT count(*)::int AS n FROM audit_log`);
       return r.rows[0].n;
     });
@@ -207,7 +207,7 @@ describe('audit log immutability (COMP-53)', () => {
   it('the app role CANNOT update an audit entry', async () => {
     // Enforced by a database grant, not by a code-review convention.
     await expect(
-      withTenant(app, { tenantId: A.tenantId, actorId: A.hrId }, async (tx) => {
+      withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
         await tx.query(`UPDATE audit_log SET action = 'tampered'`);
       }),
     ).rejects.toThrow(/permission denied/i);
@@ -215,7 +215,7 @@ describe('audit log immutability (COMP-53)', () => {
 
   it('the app role CANNOT delete an audit entry', async () => {
     await expect(
-      withTenant(app, { tenantId: A.tenantId, actorId: A.hrId }, async (tx) => {
+      withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
         await tx.query(`DELETE FROM audit_log`);
       }),
     ).rejects.toThrow(/permission denied/i);
@@ -225,7 +225,7 @@ describe('audit log immutability (COMP-53)', () => {
     // Corrections append. Rewriting a reason after the fact is exactly what a
     // ledger exists to prevent.
     await expect(
-      withTenant(app, { tenantId: A.tenantId, actorId: A.hrId }, async (tx) => {
+      withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
         await tx.query(`UPDATE transparency_ledger SET reason = 'rewritten'`);
       }),
     ).rejects.toThrow(/permission denied/i);

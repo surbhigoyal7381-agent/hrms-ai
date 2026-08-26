@@ -16,6 +16,8 @@
  * that lives only in a transport layer is authorisation you can walk around.
  */
 
+import type { Actor } from './db.js';
+
 export type Role = 'employee' | 'manager' | 'hr_admin' | 'it_admin';
 
 export type Action =
@@ -27,11 +29,26 @@ export type Action =
   | 'directory.export'
   | 'import.run';
 
-export interface Principal {
-  tenantId: string;
-  actorId: string;
-  /** The actor's own employment, if they have one. HR admins usually do. */
-  employmentId: string | null;
+/**
+ * Who is acting, as ONE identity.
+ *
+ * This used to carry `actorId` AND a separate nullable `employmentId`. The
+ * policy below compared the second; `applyEmploymentChange` recorded the first
+ * in `audit_log.actor_id`, `analytics_event.actor_id` and
+ * `transparency_ledger.decided_by`. Nothing made them agree, so authorisation
+ * was decided about one person and filed under another, and erasure — which
+ * looks for the acting EMPLOYMENT — could never find the rows it had to clear.
+ *
+ * There is now one field. There is no second slot to put the wrong value in,
+ * `EmploymentId` will not accept a bare string, and migration 0002 gives every
+ * one of those columns a composite foreign key into `employment (tenant_id, id)`
+ * so the database refuses the wrong value even under a cast.
+ *
+ * `actorEmploymentId` is NOT nullable, and that is the deliberate part: an actor
+ * with no employment in this tenant cannot act on employment records. See the
+ * decision log entry of 2026-08-26 for the alternatives that were rejected.
+ */
+export interface Principal extends Actor {
   roles: ReadonlySet<Role>;
 }
 
@@ -66,18 +83,14 @@ export function decide(
   resource: ResourceContext | null,
 ): Decision {
   const isHr = principal.roles.has('hr_admin');
-  const isSelf =
-    resource !== null &&
-    principal.employmentId !== null &&
-    principal.employmentId === resource.employmentId;
+  // The SAME field that will be recorded as the decider. When these were two
+  // fields, the policy could allow Rohan and the ledger could name HR.
+  const acting = principal.actorEmploymentId;
+  const isSelf = resource !== null && acting === resource.employmentId;
   const isPrimaryManager =
-    resource !== null &&
-    principal.employmentId !== null &&
-    resource.managerEmploymentId === principal.employmentId;
+    resource !== null && resource.managerEmploymentId === acting;
   const isSecondaryManager =
-    resource !== null &&
-    principal.employmentId !== null &&
-    resource.secondaryManagerEmploymentId === principal.employmentId;
+    resource !== null && resource.secondaryManagerEmploymentId === acting;
 
   switch (action) {
     case 'employment.create':

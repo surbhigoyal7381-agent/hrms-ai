@@ -78,3 +78,106 @@ Round-2 blocker and all three majors are now fixed with regression tests. **A hu
 5. **`[LAW — VERIFY]`** that pseudonymising `decided_by_name` and `actor_id` rather than deleting them satisfies erasure in each market.
 
 **What this verdict does not mean.** A green build covers the paths that exist. Core HR is not done, and the not-implemented list above is the proof. `50-review.md`'s own warning stands: do not read the passing tests as "Core HR works."
+
+### 2026-08-26 — `actor_id` is an employment id, and the database enforces it
+
+**Raised by:** a human, against the SHIPPED code on `main`, after the PASS WITH FIXES verdict above.
+**Severity:** live COMP-22 / PRIV-10 defect. Erasure did not erase.
+
+**What was wrong.** `audit_log.actor_id`, `analytics_event.actor_id` and
+`transparency_ledger.decided_by` were plain `uuid` columns with **no foreign key**. Nothing
+said which kind of id they held. `packages/core/src/employment.ts` wrote `principal.actorId`
+into them — a login account id — while `packages/core/src/erasure.ts` looked for them with
+`WHERE actor_id IN (SELECT id FROM employment WHERE person_id = $1)`. The two never met.
+
+Reproduced before fixing, through the real code path on postgres:16:
+
+```
+auditRowsThatExist:                1     ledgerRowsThatExist:            1
+auditMatchedByErasurePredicate:    0     ledgerMatchedByErasurePredicate: 0
+hrIdPresentInEmployment:           0     analyticsRowsThatExist:         1
+after erasePerson — rows still naming the actor: audit 2, ledger 1, analytics 1
+                                         ledger names NOT replaced: 1
+```
+
+Compare `transparency_ledger.subject_employment_id uuid NOT NULL REFERENCES employment(id)`.
+**The subject of a decision was constrained from day one. The decider was not.**
+
+**Why the tests did not catch it.** `fixes.test.ts` asserted with *the erasing code's own
+predicate*, so it compared zero to zero. Three of its four store assertions — ledger, audit,
+analytics — passed vacuously and would have passed with the erasure step deleted entirely.
+Only `employment_version` was genuine, because it matches on `employment_id`, which is real.
+`test/setup.ts` hardcoded `hrId = '00000000-0000-0000-0000-0000000000aa'` and never inserted
+it into `employment`; the fixture and the production code were wrong in the same direction,
+so neither could reveal the other. **This is the third instance of the pattern the reviewer
+caught twice: a green test cementing wrong semantics** — after the hand-written
+`TENANT_SCOPED` list and `hasLegalHold()` checking `status = 'notice'`.
+
+**Second defect found while fixing the first.** `expect(row.decided_by).toBe(rohan().actorId)`
+is a tautology, and every principal helper in the suite shared `actorId: A.hrId`. So a change
+Rohan made was recorded as decided by HR, under a test named *"the accountable human cannot be
+forged"*. Round 2's "one identity parameter" fix collapsed `actor` and `principal` into one
+**parameter** but left two **fields** on `Principal` and picked the wrong one. The
+accountability promise in `docs/07-fairness-and-transparency.md` Part 2 was not being kept.
+
+**Decision.** `actor_id` / `decided_by` always mean **`employment.id`**, enforced three ways:
+
+1. **Schema** — migration `0002_actor_is_an_employment.sql` adds a **composite** foreign key
+   `(tenant_id, <column>) REFERENCES employment (tenant_id, id)` to every accountability
+   column: `audit_log.actor_id`, `analytics_event.actor_id`, `transparency_ledger.decided_by`,
+   `employment_version.decided_by`, `org_unit_version.decided_by`, `legal_hold.placed_by`,
+   `legal_hold.released_by`. Composite for the same reason `ev_manager_same_tenant` is:
+   FK checks bypass RLS, so a single-column key accepts another tenant's employment.
+2. **Type** — `Principal` has ONE identity field, `actorEmploymentId: EmploymentId`, non-null.
+   `EmploymentId` is branded, so a bare `string` does not assign. There is no second slot to
+   put the wrong value in.
+3. **Derivation** — `Actor` is now the `Principal`, not a value built beside it.
+
+`NULL` stays legal on the two nullable columns: a composite FK is MATCH SIMPLE, so
+"NULL, or a real employment in this tenant" is exactly the erasure behaviour COMP-22 needs
+against COMP-53's append-only rule.
+
+**Rejected alternatives.**
+
+| Option | Why not |
+|---|---|
+| Make `actor_id` a `person.id` | The whole policy layer reasons in employment ids (`manager_employment_id`, self-checks). It would move the conflation rather than remove it, and a rehire gives one person two employments — "which employment acted" is the question an auditor asks. |
+| Split into `actor_employment_id` + `actor_account_id` | Honest, but keeps two fields, and the defect was two fields. The login account belongs in the session/authentication log, not in a per-row accountability column. Revisit only if an auditor asks which login session performed an action. |
+| Leave the column, add a `CHECK` or fix it in application code | A check cannot reference another table; application discipline is what failed here. `packages/core` is not the only thing that will ever write these tables. |
+| Allow a nullable actor for non-human callers | Deferred deliberately. There is no non-human writer today. A future import or purge job needs its **own modelled identity**, not a nullable column that quietly re-admits "we do not know who this is". **Open — owner: hrms-fullstack-engineer.** |
+
+**Consequence accepted:** an actor with no employment in this tenant **cannot act on
+employment records.** The old comment "HR admins usually do [have an employment]" is now a
+requirement. A support engineer acting cross-tenant already needed a modelled, audited
+impersonation path (`COMP-42`); this makes that explicit rather than silently allowing an
+unconstrained uuid.
+
+**`test/setup.ts`'s hardcoded `hrId` is gone**, replaced by a real seeded employment (Meera,
+People Ops) generated per tenant. The constant also meant tenants A and B *shared* an actor
+id, which weakened the cross-tenant tests that used `B.hrId`. Meera is seeded into her own
+org unit, not Engineering, so REQ-004's headcount numbers stay exactly as written — a fixture
+that moves a headcount hides a regression.
+
+**Also found and fixed while here.** `erasePerson` wrote its own audit entry *after* the
+`audit_log` eraser ran. Harmless while `actor_id` matched nothing; with the fix in place a
+self-service erasure would re-link the erased person's employment into the store just cleared.
+A self-service erasure now records a NULL actor and flags `selfService` in the payload.
+
+**Also found: TypeScript was never type-checked.** No `typecheck` script existed anywhere and
+`@types/node` was not installed, so `tsc` had never run on this repo — `vitest` strips types
+without checking them. The branded type above would have been decorative. Added `typecheck`
+to both packages, wired into `pnpm test` and into CI as its own step. `@types/node` is pinned
+to `^22` to match the Node 22 LTS runtime; `^26` types would describe APIs that are not there.
+
+**Also fixed: the test harness and the classification CI gate both applied only
+`0001_core_hr_foundation.sql` by name**, so any later migration was untested and unchecked.
+Both now apply every migration in sorted order.
+
+**`[LAW — VERIFY]`** unchanged from 2026-08-24: that pseudonymising `decided_by_name` and
+NULLing `actor_id`, rather than deleting the rows, satisfies erasure in each market.
+
+**Evidence.** Regression test `packages/core/test/actor-referent.test.ts` written first and
+run against the shipped code: **5 failed / 5**. After the fix: **5 passed**. Full suite
+**93 passed** (76 `packages/core`, 17 `packages/ai`), up from 88. Migration verified applied
+from scratch, rolled back via its documented down path, and its pre-flight guard verified to
+refuse a database holding a bad actor id.

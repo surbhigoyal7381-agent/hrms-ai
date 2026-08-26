@@ -29,18 +29,22 @@ beforeAll(async () => {
   await c.query(
     `INSERT INTO org_unit_version (tenant_id, org_unit_id, name, valid_from, decided_by, reason)
      VALUES ($1,$2,'Payments','2020-01-01',$3,'Initial org setup')`,
-    [A.tenantId, payments, A.hrId]);
+    [A.tenantId, payments, A.hrEmploymentId]);
   c.release();
 }, 60_000);
 
 afterAll(async () => { await app?.end(); await admin?.end(); });
 
-const actor = () => ({ tenantId: A.tenantId, actorId: A.hrId });
+const actor = () => ({ tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId });
 
-/** HR admin with no employment of their own — the common case for a Meera. */
+/**
+ * HR admin. Meera has an employment of her own, and must: the actor recorded on
+ * every change is an `employment.id`, so an HR admin with no employment cannot
+ * act. That is deliberate — see the decision log entry of 2026-08-26.
+ */
 const hr = (): Principal => ({
-  tenantId: A.tenantId, actorId: A.hrId,
-  employmentId: null, roles: new Set(['hr_admin' as const]),
+  tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId,
+  roles: new Set(['hr_admin' as const]),
 });
 
 describe('REQ-003 — effective-dated change', () => {
@@ -213,7 +217,7 @@ describe('the database refuses overlapping versions', () => {
              (tenant_id, employment_id, valid_from, valid_to, org_unit_id,
               job_title, employment_type, decided_by, reason)
            VALUES ($1,$2,'2024-01-01','2025-01-01',$3,'Engineer','full_time',$4,'overlap')`,
-          [A.tenantId, A.employmentId, A.orgUnitId, A.hrId]);
+          [A.tenantId, A.employmentId, A.orgUnitId, A.hrEmploymentId]);
       }),
     ).rejects.toThrow(/conflicting key value violates exclusion constraint/i);
   });

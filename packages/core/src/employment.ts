@@ -72,11 +72,15 @@ export async function applyEmploymentChange(
   principal: Principal,
   input: ChangeInput,
 ): Promise<{ versionId: string; superseded: string[]; reciprocal: boolean }> {
-  // ONE identity parameter. Previously `actor` and `principal` were separate and
-  // nothing compared them: authorisation checked one, `decided_by` recorded the
-  // other. The fairness charter's accountability property became a column
-  // populated from a value the authorisation check never looked at.
-  const actor: Actor = { tenantId: principal.tenantId, actorId: principal.actorId };
+  // ONE identity, and it is an employment id.
+  //
+  // Round 2 collapsed `actor` and `principal` into one parameter but kept two
+  // FIELDS on the Principal, and picked the wrong one: `actorId` was a login
+  // account id, `employmentId` was the employment the policy actually reasoned
+  // about. So the policy allowed Rohan and the ledger named HR, and erasure —
+  // which searches by employment — never found the rows. `Principal` now has a
+  // single `actorEmploymentId`, so `actor` is the principal.
+  const actor: Actor = principal;
   assertBusinessDate(input.effectiveFrom, 'effectiveFrom');
 
   // reason NOT NULL is a product decision, not a database detail
@@ -120,16 +124,13 @@ export async function applyEmploymentChange(
         AND ${POINT_IN_TIME_PREDICATE('ev', '$2')}`,
     [input.employmentId, input.effectiveFrom],
   );
-  let principalManager: string | null = null;
-  if (principal.employmentId) {
-    const pm = await tx.query(
-      `SELECT ev.manager_employment_id FROM employment_version ev
-        WHERE ev.employment_id = $1
-          AND ${POINT_IN_TIME_PREDICATE('ev', '$2')}`,
-      [principal.employmentId, input.effectiveFrom],
-    );
-    principalManager = pm.rows[0]?.manager_employment_id ?? null;
-  }
+  const pm = await tx.query(
+    `SELECT ev.manager_employment_id FROM employment_version ev
+      WHERE ev.employment_id = $1
+        AND ${POINT_IN_TIME_PREDICATE('ev', '$2')}`,
+    [principal.actorEmploymentId, input.effectiveFrom],
+  );
+  const principalManager: string | null = pm.rows[0]?.manager_employment_id ?? null;
   const decision = authorise(principal, 'employment.change', {
     employmentId: input.employmentId,
     managerEmploymentId: currentForPolicy.rows[0]?.manager_employment_id ?? null,
@@ -258,7 +259,7 @@ export async function applyEmploymentChange(
         merged.org_unit_id, merged.position_id, merged.job_title,
         merged.manager_employment_id, merged.secondary_manager_employment_id,
         merged.employment_type, merged.work_location, merged.cost_centre,
-        actor.actorId, input.reason.trim(), input.idempotencyKey ?? null,
+        actor.actorEmploymentId, input.reason.trim(), input.idempotencyKey ?? null,
       ],
     );
   } catch (err: any) {
@@ -295,7 +296,7 @@ export async function applyEmploymentChange(
           ? (rows.find((r) => r.id === plan.supersededIds[0])?.validFrom ?? null)
           : null,
       ),
-      actor.actorId, input.decidedByName,
+      actor.actorEmploymentId, input.decidedByName,
       input.reason.trim(), input.effectiveFrom, decision.reciprocal ?? false,
     ],
   );
@@ -439,7 +440,7 @@ export async function writeAudit(
         before_data, after_data, sensitive_read)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
     [
-      actor.tenantId, actor.actorId, e.action, e.resourceType, e.resourceId,
+      actor.tenantId, actor.actorEmploymentId, e.action, e.resourceType, e.resourceId,
       e.before ? JSON.stringify(e.before) : null,
       e.after ? JSON.stringify(e.after) : null,
       e.sensitiveRead ?? false,
@@ -451,7 +452,7 @@ async function emit(tx: Tx, actor: Actor, name: string, props: unknown): Promise
   await tx.query(
     `INSERT INTO analytics_event (tenant_id, name, actor_id, props)
      VALUES ($1,$2,$3,$4)`,
-    [actor.tenantId, name, actor.actorId, JSON.stringify(props)],
+    [actor.tenantId, name, actor.actorEmploymentId, JSON.stringify(props)],
   );
 }
 

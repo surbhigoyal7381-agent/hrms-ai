@@ -30,6 +30,12 @@ jobs:
       # No pnpm-lock.yaml is committed yet. Run `pnpm install` once at the repo
       # root and commit pnpm-lock.yaml, then restore --frozen-lockfile here.
       - run: pnpm install
+      # `vitest` strips types without checking them, so until this ran the
+      # TypeScript in this repo was decorative. `Actor.actorEmploymentId` is a
+      # branded type whose whole job is to refuse a bare string; unchecked, it
+      # refuses nothing. `pnpm test` also runs typecheck first in each package.
+      - name: Typecheck
+        run: pnpm -r typecheck
       - name: Tests (unit + integration, incl. cross-tenant RLS isolation)
         run: pnpm -r test
         env: { PGHOST: localhost, PGPORT: '5433' }
@@ -68,8 +74,13 @@ jobs:
       - name: Every personal-data column is classified
         run: |
           psql -h localhost -p 5433 -U postgres -c 'CREATE DATABASE hrms'
-          psql -h localhost -p 5433 -U postgres -d hrms -v ON_ERROR_STOP=1 \
-            -f packages/db/migrations/0001_core_hr_foundation.sql
+          # EVERY migration, in order. Naming one file meant this gate kept
+          # checking an older schema than the one that ships, so a constraint or
+          # column added by a later migration was never seen here at all.
+          for f in $(ls packages/db/migrations/*.sql | sort); do
+            echo "applying $f"
+            psql -h localhost -p 5433 -U postgres -d hrms -v ON_ERROR_STOP=1 -f "$f"
+          done
           # Exclusions are table.column, never a bare column name: a bare
           # exclusion silently protects nothing in every future table.
           # They are applied here, not inside the query: psql -c does not

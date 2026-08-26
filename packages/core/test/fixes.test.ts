@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type pg from 'pg';
 import { freshDatabase, adminPool, seedTenant } from './setup.js';
-import { withTenant } from '../src/db.js';
-import { applyEmploymentChange, employmentAsKnownAt, headcountAsOf } from '../src/employment.js';
+import { withTenant, asEmploymentId } from '../src/db.js';
+import {
+  applyEmploymentChange, employmentAsKnownAt, headcountAsOf, writeAudit,
+} from '../src/employment.js';
 import { decide, ForbiddenError, type Principal } from '../src/policy.js';
 import { erasePerson, CORE_HR_STORES } from '../src/erasure.js';
 import { ValidationError } from '../src/temporal.js';
@@ -20,6 +22,7 @@ let A: Awaited<ReturnType<typeof seedTenant>>;
 let B: Awaited<ReturnType<typeof seedTenant>>;
 let payments: string;
 let rohanEmp: string;
+let strangerEmp: string;
 
 beforeAll(async () => {
   app = await freshDatabase(DB);
@@ -32,7 +35,7 @@ beforeAll(async () => {
   payments = ou.rows[0].id;
   await c.query(
     `INSERT INTO org_unit_version (tenant_id, org_unit_id, name, valid_from, decided_by, reason)
-     VALUES ($1,$2,'Payments','2020-01-01',$3,'setup')`, [A.tenantId, payments, A.hrId]);
+     VALUES ($1,$2,'Payments','2020-01-01',$3,'setup')`, [A.tenantId, payments, A.hrEmploymentId]);
   // Rohan — Aisha's manager.
   const rp = await c.query(`INSERT INTO person (tenant_id, legal_name) VALUES ($1,'Rohan Mehta') RETURNING id`, [A.tenantId]);
   const re = await c.query(
@@ -43,26 +46,50 @@ beforeAll(async () => {
     `INSERT INTO employment_version (tenant_id, employment_id, valid_from, org_unit_id,
        job_title, employment_type, decided_by, reason)
      VALUES ($1,$2,'2021-01-04',$3,'Engineering Manager','full_time',$4,'Initial hire')`,
-    [A.tenantId, rohanEmp, A.orgUnitId, A.hrId]);
+    [A.tenantId, rohanEmp, A.orgUnitId, A.hrEmploymentId]);
   await c.query(
     `UPDATE employment_version SET manager_employment_id = $2 WHERE employment_id = $1`,
     [A.employmentId, rohanEmp]);
+  // A real colleague with no management relationship to Aisha. This used to be
+  // an invented uuid; it now has to be a real employment, because the actor is
+  // the employment and migration 0002 will not accept anything else.
+  const sp = await c.query(
+    `INSERT INTO person (tenant_id, legal_name) VALUES ($1,'Sam Stranger') RETURNING id`,
+    [A.tenantId]);
+  const se = await c.query(
+    `INSERT INTO employment (tenant_id, person_id, employee_number, hire_date, status)
+     VALUES ($1,$2,'E-1003','2022-05-09','active') RETURNING id`, [A.tenantId, sp.rows[0].id]);
+  strangerEmp = se.rows[0].id;
+  await c.query(
+    `INSERT INTO employment_version (tenant_id, employment_id, valid_from, org_unit_id,
+       job_title, employment_type, decided_by, reason)
+     VALUES ($1,$2,'2022-05-09',$3,'Engineer','full_time',$4,'Initial hire')`,
+    [A.tenantId, strangerEmp, A.orgUnitId, A.hrEmploymentId]);
   c.release();
 }, 60_000);
 
 afterAll(async () => { await app?.end(); await admin?.end(); });
 
-const actor = () => ({ tenantId: A.tenantId, actorId: A.hrId });
+/**
+ * Each principal now carries ONE identity, and it is that person's own
+ * employment. Previously every helper here shared `actorId: A.hrId`, so
+ * `rohan().actorId === hr().actorId === stranger().actorId` and no assertion on
+ * the recorded actor could tell them apart — in a block titled "the accountable
+ * human cannot be forged".
+ */
 const hr = (): Principal => ({
-  tenantId: A.tenantId, actorId: A.hrId, employmentId: null, roles: new Set(['hr_admin']) });
+  tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId, roles: new Set(['hr_admin']) });
 const rohan = (): Principal => ({
-  tenantId: A.tenantId, actorId: A.hrId, employmentId: rohanEmp, roles: new Set(['manager']) });
+  tenantId: A.tenantId, actorEmploymentId: asEmploymentId(rohanEmp), roles: new Set(['manager']) });
 const aisha = (): Principal => ({
-  tenantId: A.tenantId, actorId: A.hrId, employmentId: A.employmentId, roles: new Set(['employee']) });
+  tenantId: A.tenantId, actorEmploymentId: asEmploymentId(A.employmentId),
+  roles: new Set(['employee']) });
 /** A colleague with no management relationship to Aisha at all. */
 const stranger = (): Principal => ({
-  tenantId: A.tenantId, actorId: A.hrId,
-  employmentId: '00000000-0000-0000-0000-0000000000cc', roles: new Set(['employee']) });
+  tenantId: A.tenantId, actorEmploymentId: asEmploymentId(strangerEmp),
+  roles: new Set(['employee']) });
+/** The session actor for setup/read transactions. HR, and a real employment. */
+const actor = () => hr();
 
 const change = (overrides = {}) => ({
   employmentId: A.employmentId, effectiveFrom: '2026-09-01',
@@ -86,16 +113,29 @@ describe('BLOCKER-1 — authorisation exists and is enforced in packages/core', 
       { employmentId: A.employmentId, managerEmploymentId: rohanEmp, secondaryManagerEmploymentId: null })
       .allowed).toBe(false);
     // Self-approval is a control failure even for an admin.
-    const hrWithEmployment: Principal = { ...hr(), employmentId: A.employmentId };
+    //
+    // Note what this line used to be: `{ ...hr(), employmentId: A.employmentId }`
+    // — a Principal whose `employmentId` said Aisha while its `actorId` still
+    // said HR. That object could not exist in reality, and building it was only
+    // possible because there were two identity fields. There is one now, so
+    // "an HR admin acting on their own record" is simply an hr_admin whose
+    // acting employment IS the resource.
+    const hrWithEmployment: Principal = {
+      ...hr(), actorEmploymentId: asEmploymentId(A.employmentId) };
     expect(decide(hrWithEmployment, 'employment.change',
       { employmentId: A.employmentId, managerEmploymentId: null, secondaryManagerEmploymentId: null })
       .allowed).toBe(false);
   });
 
   it('a dotted-line manager can read but NOT write', () => {
-    const dotted: Principal = { ...rohan(), employmentId: 'dotted-id' };
+    // The dotted-line manager is a real employment, and the SAME id appears as
+    // the acting employment and as the resource's secondary manager. Previously
+    // the two were an invented string that no employment could ever have.
+    const dotted: Principal = {
+      ...rohan(), actorEmploymentId: asEmploymentId(strangerEmp) };
     expect(decide(dotted, 'employment.change',
-      { employmentId: A.employmentId, managerEmploymentId: rohanEmp, secondaryManagerEmploymentId: 'dotted-id' })
+      { employmentId: A.employmentId, managerEmploymentId: rohanEmp,
+        secondaryManagerEmploymentId: strangerEmp })
       .allowed).toBe(false);
   });
 
@@ -122,8 +162,14 @@ describe('MAJOR-1 — the accountable human cannot be forged', () => {
         `SELECT decided_by FROM employment_version WHERE id = $1`, [res.versionId]);
       return r.rows[0];
     });
-    // There is now ONE identity parameter, so these cannot diverge.
-    expect(row.decided_by).toBe(rohan().actorId);
+    // Grounded in the employment id this file seeded, NOT re-derived from the
+    // Principal the code was handed. The previous assertion was
+    // `toBe(rohan().actorId)` — the same value the code writes, so it passed for
+    // ANY value, and in fact passed while recording HR as the decider of a
+    // change Rohan made.
+    expect(row.decided_by, 'the version names someone other than Rohan').toBe(rohanEmp);
+    // ...and it must be Rohan specifically, not merely "an employment".
+    expect(row.decided_by).not.toBe(A.hrEmploymentId);
   });
 
   it('the reciprocal flag is not set for an ordinary manager change', async () => {
@@ -188,13 +234,13 @@ describe('MAJOR-1 — headcount survives a reorganisation', () => {
     await c.query(
       `INSERT INTO org_unit_version (tenant_id, org_unit_id, name, valid_from, decided_by, reason)
        VALUES ($1,$2,'Commerce','2026-10-01',$3,'New commerce org')`,
-      [A.tenantId, com.rows[0].id, A.hrId]);
+      [A.tenantId, com.rows[0].id, A.hrEmploymentId]);
     await c.query(`UPDATE org_unit_version SET valid_to = '2026-10-01'
                     WHERE org_unit_id = $1 AND valid_to IS NULL`, [payments]);
     await c.query(
       `INSERT INTO org_unit_version (tenant_id, org_unit_id, parent_id, name, valid_from, decided_by, reason)
        VALUES ($1,$2,$3,'Payments','2026-10-01',$4,'Payments moves under Commerce')`,
-      [A.tenantId, payments, com.rows[0].id, A.hrId]);
+      [A.tenantId, payments, com.rows[0].id, A.hrEmploymentId]);
     c.release();
 
     // The org unit IDENTITY is unchanged, so employment_version still points at
@@ -265,7 +311,7 @@ describe('MAJOR-3 — reporting cycles and cross-tenant manager pointers', () =>
           `INSERT INTO employment_version (tenant_id, employment_id, valid_from,
              org_unit_id, job_title, employment_type, manager_employment_id, decided_by, reason)
            VALUES ($1,$2,'2026-01-01',$3,'Engineer','full_time',$4,$5,'cross-tenant manager')`,
-          [A.tenantId, e.rows[0].id, A.orgUnitId, B.employmentId, A.hrId]);
+          [A.tenantId, e.rows[0].id, A.orgUnitId, B.employmentId, A.hrEmploymentId]);
       }),
     ).rejects.toThrow(/violates foreign key constraint/i);
   });
@@ -288,10 +334,64 @@ describe('BLOCKER-3 — erasure reaches every store this module writes to', () =
 
   it('erases the person and asserts EACH store independently', async () => {
     const personId = A.personId;
-    await withTenant(app, actor(), (tx) => erasePerson(tx, actor(), personId));
 
-    // Each store is checked on its own — not by trusting the orchestrator
-    // returned success. This is the assertion shape REQ-010 specifies.
+    // Aisha must ACT before she is erased, or the actor-linked stores hold
+    // nothing about her and three of the four assertions below are 0 === 0.
+    // Aisha cannot change her own record, so she corrects a colleague-visible
+    // audit event directly through the audit writer — the same path
+    // applyEmploymentChange uses.
+    await withTenant(app, aisha(), async (tx) => {
+      await writeAudit(tx, aisha(), {
+        action: 'person.viewed_sensitive', resourceType: 'employment',
+        resourceId: rohanEmp, sensitiveRead: true,
+      });
+      await tx.query(
+        `INSERT INTO analytics_event (tenant_id, name, actor_id, props)
+         VALUES ($1,'directory.searched',$2,'{}'::jsonb)`,
+        [A.tenantId, A.employmentId]);
+      await tx.query(
+        `INSERT INTO transparency_ledger
+           (tenant_id, subject_employment_id, what, decided_by, decided_by_name,
+            reason, effective_from)
+         VALUES ($1,$2,'Updated their own contact details',$3,'Aisha Kumar',
+                 'Self-correction','2026-08-01')`,
+        [A.tenantId, rohanEmp, A.employmentId]);
+    });
+
+    // The guard the original test lacked: prove there is something to erase.
+    // Counted with Aisha's actual employment id, which this suite seeded — not
+    // with the eraser's own predicate.
+    const before = await withTenant(app, actor(), async (tx) => {
+      const q = async (sql: string) => (await tx.query(sql, [A.employmentId])).rows[0].n as number;
+      return {
+        audit: await q(`SELECT count(*)::int n FROM audit_log WHERE actor_id = $1`),
+        analytics: await q(`SELECT count(*)::int n FROM analytics_event WHERE actor_id = $1`),
+        ledger: await q(`SELECT count(*)::int n FROM transparency_ledger WHERE decided_by = $1`),
+      };
+    });
+    expect(before.audit, 'audit_log holds nothing by Aisha — the check below would be vacuous')
+      .toBeGreaterThan(0);
+    expect(before.analytics, 'analytics_event holds nothing by Aisha — vacuous').toBeGreaterThan(0);
+    expect(before.ledger, 'transparency_ledger holds nothing by Aisha — vacuous').toBeGreaterThan(0);
+
+    const result = await withTenant(app, actor(), (tx) => erasePerson(tx, actor(), personId));
+
+    // The orchestrator must REPORT the work, per store, and the counts must be
+    // at least what we independently counted beforehand. A store that quietly
+    // returns 0 while rows remain is the failure REQ-010 exists to catch, and
+    // `perStore.length > 0` cannot see it — the array is pushed unconditionally.
+    const byStore = Object.fromEntries(result.perStore.map((x) => [x.store, x.rowsAffected]));
+    expect(byStore.audit_log, 'erasure reported no audit_log rows').toBeGreaterThanOrEqual(before.audit);
+    expect(byStore.analytics_event, 'erasure reported no analytics_event rows')
+      .toBeGreaterThanOrEqual(before.analytics);
+    expect(byStore.transparency_ledger, 'erasure reported no ledger rows')
+      .toBeGreaterThanOrEqual(before.ledger);
+
+    // Each store is checked on its own — and by a predicate the erasing code
+    // does NOT share. The previous version of this test asked
+    // `WHERE actor_id IN (SELECT id FROM employment WHERE person_id = $1)`,
+    // verbatim the eraser's own WHERE clause; it matched nothing before erasure
+    // and nothing after, and would have passed with erasure deleted entirely.
     const checks = await withTenant(app, actor(), async (tx) => {
       const person = await tx.query(
         `SELECT legal_name, personal_email, personal_phone, national_id_ref,
@@ -300,18 +400,14 @@ describe('BLOCKER-3 — erasure reaches every store this module writes to', () =
         `SELECT work_email FROM employment WHERE person_id = $1`, [personId]);
       const ledger = await tx.query(
         `SELECT count(*)::int AS n FROM transparency_ledger
-          WHERE decided_by IN (SELECT id FROM employment WHERE person_id = $1)
-            AND decided_by_name <> 'Former employee'`, [personId]);
+          WHERE decided_by = $1 AND decided_by_name <> 'Former employee'`, [A.employmentId]);
       const audit = await tx.query(
-        `SELECT count(*)::int AS n FROM audit_log
-          WHERE actor_id IN (SELECT id FROM employment WHERE person_id = $1)`, [personId]);
+        `SELECT count(*)::int AS n FROM audit_log WHERE actor_id = $1`, [A.employmentId]);
       const analytics = await tx.query(
-        `SELECT count(*)::int AS n FROM analytics_event
-          WHERE actor_id IN (SELECT id FROM employment WHERE person_id = $1)`, [personId]);
+        `SELECT count(*)::int AS n FROM analytics_event WHERE actor_id = $1`, [A.employmentId]);
       const versions = await tx.query(
         `SELECT count(*)::int AS n FROM employment_version
-          WHERE employment_id IN (SELECT id FROM employment WHERE person_id = $1)
-            AND reason <> '[erased]'`, [personId]);
+          WHERE employment_id = $1 AND reason <> '[erased]'`, [A.employmentId]);
       return { person: person.rows[0], employment: employment.rows[0], ledger: ledger.rows[0].n,
                audit: audit.rows[0].n, analytics: analytics.rows[0].n, versions: versions.rows[0].n };
     });
@@ -350,7 +446,7 @@ describe('BLOCKER-3 — erasure reaches every store this module writes to', () =
     await c2.query(`SELECT set_config('app.tenant_id', $1, false)`, [A.tenantId]);
     await c2.query(
       `INSERT INTO legal_hold (tenant_id, person_id, reason, placed_by)
-       VALUES ($1,$2,'POSH investigation 2026-114',$3)`, [A.tenantId, personId, A.hrId]);
+       VALUES ($1,$2,'POSH investigation 2026-114',$3)`, [A.tenantId, personId, A.hrEmploymentId]);
     c2.release();
 
     const held = await withTenant(app, actor(), (tx) => erasePerson(tx, actor(), personId));
@@ -363,7 +459,7 @@ describe('BLOCKER-3 — erasure reaches every store this module writes to', () =
     await withTenant(app, actor(), async (tx) => {
       await tx.query(
         `UPDATE legal_hold SET released_at = now(), released_by = $2
-          WHERE person_id = $1 AND released_at IS NULL`, [personId, A.hrId]);
+          WHERE person_id = $1 AND released_at IS NULL`, [personId, A.hrEmploymentId]);
     });
     const after = await withTenant(app, actor(), (tx) => erasePerson(tx, actor(), personId));
     expect(after.heldByLegalHold).toBe(false);

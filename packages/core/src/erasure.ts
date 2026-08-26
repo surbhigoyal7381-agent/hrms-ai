@@ -8,7 +8,7 @@
  *
  * A delete that leaves the row in the search index is not a delete.
  */
-import type { Tx } from './db.js';
+import type { Tx, Actor } from './db.js';
 
 export type ErasureMode =
   /** Row is removed entirely. */
@@ -16,6 +16,21 @@ export type ErasureMode =
   /** Row survives; identifying columns are replaced. Used where a record must
    *  remain for audit or for the other party's rights. */
   | 'minimise';
+
+/**
+ * The predicate every actor-linked store erases by.
+ *
+ * It was always written this way. Until migration 0002 it matched nothing,
+ * because the columns held login account ids rather than employment ids and
+ * nothing constrained them — so erasure silently did no work and the test that
+ * checked it asked this same question and also got nothing. The columns now
+ * carry a composite foreign key into `employment (tenant_id, id)`, so this
+ * predicate means what it reads as.
+ *
+ * Tests must NOT re-use this constant. An assertion that shares the eraser's own
+ * predicate compares zero to zero. Assert against the employment id you seeded.
+ */
+const ACTED_BY_PERSON = `IN (SELECT id FROM employment WHERE person_id = $1)`;
 
 export interface StoreEraser {
   store: string;
@@ -46,7 +61,7 @@ export const CORE_HR_STORES: StoreEraser[] = [
     async erase(tx, personId) {
       const r = await tx.query(
         `UPDATE analytics_event SET actor_id = NULL
-          WHERE actor_id IN (SELECT id FROM employment WHERE person_id = $1)`,
+          WHERE actor_id ${ACTED_BY_PERSON}`,
         [personId],
       );
       return r.rowCount ?? 0;
@@ -64,7 +79,7 @@ export const CORE_HR_STORES: StoreEraser[] = [
     async erase(tx, personId) {
       const r = await tx.query(
         `UPDATE transparency_ledger SET decided_by_name = 'Former employee'
-          WHERE decided_by IN (SELECT id FROM employment WHERE person_id = $1)`,
+          WHERE decided_by ${ACTED_BY_PERSON}`,
         [personId],
       );
       return r.rowCount ?? 0;
@@ -79,7 +94,7 @@ export const CORE_HR_STORES: StoreEraser[] = [
     async erase(tx, personId) {
       const r = await tx.query(
         `UPDATE audit_log SET actor_id = NULL
-          WHERE actor_id IN (SELECT id FROM employment WHERE person_id = $1)`,
+          WHERE actor_id ${ACTED_BY_PERSON}`,
         [personId],
       );
       return r.rowCount ?? 0;
@@ -159,7 +174,7 @@ export async function hasLegalHold(
 
 export async function erasePerson(
   tx: Tx,
-  actor: { tenantId: string; actorId: string },
+  actor: Actor,
   personId: string,
   stores: StoreEraser[] = CORE_HR_STORES,
 ): Promise<ErasureResult> {
@@ -177,11 +192,37 @@ export async function erasePerson(
   // COMP-22 + COMP-53: the most consequential write in the system must itself be
   // evidenced. Written LAST so it survives the person-row minimisation, and it
   // carries no PII — only counts.
+  //
+  // ...but writing it last re-links the actor AFTER the audit_log eraser has
+  // run. If the actor is the person being erased — a self-service erasure —
+  // that single row would put their employment id straight back into a store we
+  // had just cleared. So a self-service erasure records a NULL actor and says in
+  // the payload that it was self-service. Nothing is lost: the resource_id
+  // already identifies whose erasure this was.
+  const selfService = await isOwnEmployment(tx, actor.actorEmploymentId, personId);
   await tx.query(
     `INSERT INTO audit_log (tenant_id, actor_id, action, resource_type, resource_id, after_data)
      VALUES ($1,$2,'person.erased','person',$3,$4)`,
-    [actor.tenantId, actor.actorId, personId, JSON.stringify({ perStore })],
+    [
+      actor.tenantId,
+      selfService ? null : actor.actorEmploymentId,
+      personId,
+      JSON.stringify({ perStore, selfService }),
+    ],
   );
 
   return { personId, perStore, heldByLegalHold: false, holdReason: null };
+}
+
+/** Is the acting employment one of the erased person's own employments? */
+async function isOwnEmployment(
+  tx: Tx,
+  actorEmploymentId: string,
+  personId: string,
+): Promise<boolean> {
+  const r = await tx.query(
+    `SELECT 1 FROM employment WHERE id = $1 AND person_id = $2`,
+    [actorEmploymentId, personId],
+  );
+  return (r.rowCount ?? 0) > 0;
 }

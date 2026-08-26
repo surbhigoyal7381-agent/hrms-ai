@@ -127,9 +127,66 @@ Forward: one migration creating extensions, tables, indexes, constraints, RLS po
 3. **Aisha's main action in 10s?** Viewing her record: target < 2s to interactive. Self-correction: < 10s.
 4. **Left out:** custom fields, approval workflows, multi-entity, matrix org, headcount planning, delegation for managers on leave.
 
+## Amendment, 2026-08-26 — who `actor_id` refers to (defect fix on shipped code)
+
+This note originally described `actor_id` and `decided_by` only as "who did it". It never said
+**which kind of id** they hold, and neither did the schema: they were plain `uuid` with no
+foreign key, while `transparency_ledger.subject_employment_id` next to them was
+`NOT NULL REFERENCES employment(id)`. The subject of a decision was constrained; the decider
+was not. Erasure searched those columns by joining to `employment`, the application wrote a
+login account id into them, and the two never met — so erasure silently erased nothing in
+three of the six stores. Full reasoning, evidence and rejected alternatives are in
+`99-decision-log.md` under the same date.
+
+**As built now:**
+
+| Concern | Decision |
+|---|---|
+| Referent | `actor_id` / `decided_by` are always an `employment.id`. |
+| Schema enforcement | Migration `0002` adds `(tenant_id, <column>) REFERENCES employment (tenant_id, id)` to `audit_log.actor_id`, `analytics_event.actor_id`, `transparency_ledger.decided_by`, `employment_version.decided_by`, `org_unit_version.decided_by`, `legal_hold.placed_by`, `legal_hold.released_by`. Composite, because FK checks bypass RLS and a single-column key accepts another tenant's employment. |
+| Type enforcement | `Principal` carries ONE identity, `actorEmploymentId: EmploymentId`, non-null and branded. `Actor` **is** the `Principal`, not a value assembled next to it. |
+| Nullability | `NULL` stays legal on `audit_log.actor_id` and `analytics_event.actor_id`. A composite FK is MATCH SIMPLE, so the rule reads "NULL, or a real employment in this tenant" — which is what COMP-22 needs against COMP-53's append-only grant. |
+| Actors with no employment | Cannot act on employment records. Deliberate. A future import or purge job gets its own modelled identity, not a nullable column. |
+
+**Failure matrix addition**
+
+| What fails | Detected how | Behaviour | User sees |
+|---|---|---|---|
+| Caller supplies an id that is not an employment | Composite FK, at write time | Whole transaction rolls back; the change, its audit row and its ledger entry all fail together | An error, not a half-written change — the ledger entry and the change it explains are already in one transaction by design |
+| Caller supplies another tenant's employment | Tenant component of the same FK | Same | Same |
+| Person who acted requests erasure | `erasePerson` | Actor link NULLed on `audit_log` and `analytics_event`; `decided_by_name` pseudonymised on the ledger, which stays append-only so other people's evidence survives | "Former employee" in place of the name |
+| The erasing actor IS the person being erased | `erasePerson` checks before writing its own audit row | That row records a NULL actor and flags `selfService`; it no longer re-links the person into a store just cleared | Nothing — `resource_id` still identifies whose erasure it was |
+
+**Migration and rollback for 0002.** Adds constraints and indexes only — no column added, dropped
+or retyped, and no row rewritten, so the down path (written out in the migration file) loses no
+data. Rolling back re-opens the erasure gap. The migration refuses to run against a database
+that already holds a bad actor id, and names the table, column and row count rather than leaving
+Postgres' own constraint error to be decoded.
+
+**Two gates that were not gates.** `tsc` had never run on this repo — no `typecheck` script and
+no `@types/node`, and `vitest` strips types without checking them — so the branded type above
+would have been decorative. And both the test harness and the classification CI job applied
+`0001_core_hr_foundation.sql` **by name**, so no later migration was ever exercised or checked.
+Both fixed: typecheck runs in `pnpm test` and as its own CI step, and both paths now apply every
+migration in sorted order.
+
 ## Handoff
 
 **To:** hrms-test-automation
 **Ready:** yes
 **Write your test plan from `20-requirements.md` before reading my implementation.**
 **Challenge these:** shared schema over schema-per-tenant · non-overlap enforced in the database rather than the application · legal name corrected in place rather than effective-dated · `exited` as a terminal state.
+
+**Added 2026-08-26, for the Test Automation agent.** The rule the suite must now hold to:
+**an assertion must not use the same predicate, constant or derivation as the code it tests.**
+Three erasure assertions and the `decided_by` accountability assertion were tautologies that
+passed against broken code. Assert against something independently known — the identifier you
+seeded, a count taken before the action, a row you inserted deliberately — and put a
+`toBeGreaterThan(0)` guard before any "and now it is zero" check, so a vacuous pass fails loudly.
+A sweep of the whole suite found further instances of the same shape that are **not** fixed here
+and need a test-plan decision: the point-in-time predicate re-implemented inside
+`employment.test.ts` rather than exercised through `POINT_IN_TIME_PREDICATE`; the PRIV-07
+"no PII in audit payloads" check, which searches for a string that no code path can put in that
+table; the RLS cross-tenant sweep, whose per-row loop asserts nothing for the tables that are
+empty; and in `packages/ai`, `it.each` cases generated from the very set they are meant to
+police.
