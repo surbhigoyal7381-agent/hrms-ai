@@ -169,6 +169,18 @@ export async function withoutTenant<T>(
     const result = await fn(client);
     await client.query('COMMIT');
     return result;
+  } catch (err) {
+    // Without this, a failure inside `fn` releases a client that is still in an
+    // aborted transaction back into the pool, and the NEXT test to borrow it
+    // dies with "current transaction is aborted" — a failure that points at
+    // innocent code. One real failure here produced two, and the second one
+    // named a test that was working correctly.
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // The connection is already unusable; the original error is the useful one.
+    }
+    throw err;
   } finally {
     client.release();
   }

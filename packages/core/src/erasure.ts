@@ -9,6 +9,7 @@
  * A delete that leaves the row in the search index is not a delete.
  */
 import type { Tx, Actor } from './db.js';
+import { writeAudit } from './audit.js';
 
 export type ErasureMode =
   /** Row is removed entirely. */
@@ -90,10 +91,27 @@ export const CORE_HR_STORES: StoreEraser[] = [
     mode: 'minimise',
     justification:
       'Retained under a statutory record-keeping obligation. Payload is already ' +
-      'PII-redacted (PRIV-07); the actor link is removed. [LAW — VERIFY retention.]',
+      'PII-redacted (PRIV-07). The actor link is removed AND the viewer name ' +
+      'captured at read time is pseudonymised (REQ-020), through the narrow ' +
+      'column grants on those two columns only. actor_kind and actor_role_label ' +
+      'survive, so the entry still reads as a sentence: "Former employee, ' +
+      'Engineering Manager - opened your record on 14 August". ' +
+      '[LAW — VERIFY retention.]',
     async erase(tx, personId) {
+      // BOTH columns in ONE statement, deliberately.
+      //
+      // These were briefly two registered stores, and the second could never
+      // match: the first had already set `actor_id = NULL`, so the predicate
+      // that finds "rows this person viewed" found nothing, and the captured
+      // name survived erasure. The regression test caught it because it asserts
+      // the NAME is gone, not just the id — an erasure ordering bug is invisible
+      // to a test that only checks the column erased first.
+      //
+      // One statement cannot be reordered into being wrong.
       const r = await tx.query(
-        `UPDATE audit_log SET actor_id = NULL
+        `UPDATE audit_log
+            SET actor_id = NULL,
+                actor_display_name = 'Former employee'
           WHERE actor_id ${ACTED_BY_PERSON}`,
         [personId],
       );
@@ -200,16 +218,29 @@ export async function erasePerson(
   // the payload that it was self-service. Nothing is lost: the resource_id
   // already identifies whose erasure this was.
   const selfService = await isOwnEmployment(tx, actor.actorEmploymentId, personId);
-  await tx.query(
-    `INSERT INTO audit_log (tenant_id, actor_id, action, resource_type, resource_id, after_data)
-     VALUES ($1,$2,'person.erased','person',$3,$4)`,
-    [
-      actor.tenantId,
-      selfService ? null : actor.actorEmploymentId,
-      personId,
-      JSON.stringify({ perStore, selfService }),
-    ],
-  );
+  if (selfService) {
+    // A self-service erasure must not re-link the person into a store we have
+    // just cleared. `actor_kind` still says `human` — RULE-005: a missing actor
+    // id is NEVER a system read, because telling somebody no person touched
+    // their record when one did is the worst thing this log can say.
+    await tx.query(
+      `INSERT INTO audit_log
+         (tenant_id, actor_id, actor_kind, actor_display_name,
+          action, resource_type, resource_id, subject_person_id, purpose_code, after_data)
+       VALUES ($1, NULL, 'human', 'Former employee',
+               'person.erased','person',$2,$2,'employee_request',$3::jsonb)`,
+      [actor.tenantId, personId, JSON.stringify({ perStore, selfService })],
+    );
+  } else {
+    await writeAudit(tx, actor, {
+      action: 'person.erased',
+      resourceType: 'person',
+      resourceId: personId,
+      subjectPersonId: personId,
+      purpose: 'employee_request',
+      after: { perStore, selfService },
+    });
+  }
 
   return { personId, perStore, heldByLegalHold: false, holdReason: null };
 }

@@ -22,6 +22,7 @@ let A: Awaited<ReturnType<typeof seedTenant>>;
 let B: Awaited<ReturnType<typeof seedTenant>>;
 let payments: string;
 let rohanEmp: string;
+let rohanPerson: string;
 let strangerEmp: string;
 
 beforeAll(async () => {
@@ -42,6 +43,7 @@ beforeAll(async () => {
     `INSERT INTO employment (tenant_id, person_id, employee_number, hire_date, status)
      VALUES ($1,$2,'E-1002','2021-01-04','active') RETURNING id`, [A.tenantId, rp.rows[0].id]);
   rohanEmp = re.rows[0].id;
+  rohanPerson = rp.rows[0].id;
   await c.query(
     `INSERT INTO employment_version (tenant_id, employment_id, valid_from, org_unit_id,
        job_title, employment_type, decided_by, reason)
@@ -322,6 +324,10 @@ describe('BLOCKER-3 — erasure reaches every store this module writes to', () =
   it('the registry covers every store, with a justification for each minimise', () => {
     const stores = CORE_HR_STORES.map((s) => s.store).sort();
     expect(stores).toEqual([
+      // audit_log covers BOTH the actor link and the viewer name captured at
+      // read time (REQ-020) — one statement, because as two stores the second
+      // ran after the first had nulled the id it matched on and silently
+      // erased nothing.
       'analytics_event', 'audit_log', 'employment', 'employment_version',
       'person', 'transparency_ledger',
     ]);
@@ -344,6 +350,7 @@ describe('BLOCKER-3 — erasure reaches every store this module writes to', () =
       await writeAudit(tx, aisha(), {
         action: 'person.viewed_sensitive', resourceType: 'employment',
         resourceId: rohanEmp, sensitiveRead: true,
+        subjectPersonId: rohanPerson, purpose: 'support',
       });
       await tx.query(
         `INSERT INTO analytics_event (tenant_id, name, actor_id, props)
@@ -498,15 +505,75 @@ describe('MAJOR-4 — the classification gate covers EVERY tenant-scoped table',
     const missing = await admin.query(
       `SELECT c.table_name || '.' || c.column_name AS col
          FROM information_schema.columns c
+         JOIN information_schema.tables t
+           ON t.table_schema = c.table_schema AND t.table_name = c.table_name
          JOIN information_schema.columns tc
            ON tc.table_name = c.table_name AND tc.column_name = 'tenant_id'
          LEFT JOIN data_classification dc
            ON dc.table_name = c.table_name AND dc.column_name = c.column_name
         WHERE c.table_schema = 'public'
+          AND t.table_type = 'BASE TABLE'
           AND (c.table_name || '.' || c.column_name) <> ALL($1)
           AND dc.column_name IS NULL
         ORDER BY 1`, [nonPersonal]);
     expect(missing.rows.map((r: any) => r.col)).toEqual([]);
+  });
+
+  it('every VIEW column resolves to a classified column on a base table', async () => {
+    // Why views are scoped out of the sweep above, and why this replaces the
+    // exemption rather than being one.
+    //
+    // A view stores nothing. Retention clocks, erasure and the record of
+    // processing all attach to stored data, so a classification row on a view
+    // column would be a second copy of the base table's row — and two copies
+    // drift. `access_log_visible` is `audit_log` minus the suppressed entries;
+    // classifying `access_log_visible.actor_display_name` separately from
+    // `audit_log.actor_display_name` invites them to disagree about retention.
+    //
+    // But "excluded from the sweep" must not mean "unchecked". A view can
+    // surface a column the sweep never saw — an expression, a join to an
+    // unclassified table, a rename. So every view column must trace back to a
+    // classified base-table column of the SAME name, or this fails.
+    const nonPersonal = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), '../../db/nonpersonal-columns.txt'),
+      'utf8').split('\n').map((s) => s.trim()).filter(Boolean);
+    const unresolved = await admin.query(
+      `SELECT v.table_name || '.' || v.column_name AS col
+         FROM information_schema.columns v
+         JOIN information_schema.tables t
+           ON t.table_schema = v.table_schema AND t.table_name = v.table_name
+        WHERE v.table_schema = 'public'
+          AND t.table_type = 'VIEW'
+          -- Resolves if the same column name is classified on a base table...
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM data_classification dc
+                  JOIN information_schema.tables bt
+                    ON bt.table_name = dc.table_name AND bt.table_type = 'BASE TABLE'
+                 WHERE dc.column_name = v.column_name)
+          -- ...or is a base-table column already declared non-personal.
+          -- action, at and id carry no personal data on audit_log, so they
+          -- carry none in a view over audit_log either.
+          AND NOT EXISTS (
+                SELECT 1
+                  FROM information_schema.columns bc
+                  JOIN information_schema.tables bt
+                    ON bt.table_schema = bc.table_schema AND bt.table_name = bc.table_name
+                 WHERE bt.table_type = 'BASE TABLE'
+                   AND bc.table_schema = 'public'
+                   AND bc.column_name = v.column_name
+                   AND (bc.table_name || '.' || bc.column_name) = ANY($1))
+        ORDER BY 1`, [nonPersonal]);
+    expect(
+      unresolved.rows.map((r: any) => r.col),
+      'a view exposes a column that is classified nowhere',
+    ).toEqual([]);
+
+    // Positive control: the assertion above is worthless if there are no views.
+    const views = await admin.query(
+      `SELECT count(*)::int AS n FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_type = 'VIEW'`);
+    expect(views.rows[0].n, 'no views exist, so the check proved nothing').toBeGreaterThan(0);
   });
 
   it('retention is populated where a statutory clock applies (COMP-30)', async () => {

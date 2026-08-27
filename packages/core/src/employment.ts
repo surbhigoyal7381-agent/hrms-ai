@@ -8,6 +8,12 @@ import {
   type VersionRow,
 } from './temporal.js';
 import { authorise, type Principal } from './policy.js';
+// The audit write lives in one place now: it captures the actor's name and role
+// from the database at write time (REQ-020) and requires a purpose (RULE-004).
+import { writeAudit, type PurposeCode } from './audit.js';
+
+export { writeAudit, writeSystemRead, resolvePurpose, ALL_PURPOSE_CODES } from './audit.js';
+export type { PurposeCode, AuditEvent } from './audit.js';
 
 /**
  * RULE-002 — the point-in-time predicate. ONE copy, interpolated everywhere.
@@ -91,7 +97,7 @@ export async function applyEmploymentChange(
   }
 
   const emp = await tx.query(
-    `SELECT id, hire_date::text AS hire_date, exit_date::text AS exit_date, status
+    `SELECT id, person_id, hire_date::text AS hire_date, exit_date::text AS exit_date, status
        FROM employment WHERE id = $1`,
     [input.employmentId],
   );
@@ -277,6 +283,11 @@ export async function applyEmploymentChange(
     action: 'employment.attribute_changed',
     resourceType: 'employment',
     resourceId: input.employmentId,
+    // Whose record this was ABOUT — not who did it. Without it, "everything
+    // about Aisha" is a union over four resource shapes that the next module
+    // silently falls out of (REQ-018).
+    subjectPersonId: employment.person_id,
+    purpose: 'record_correction',
     before: redact(currentRow),
     after: redact(merged),
   });
@@ -420,32 +431,6 @@ export function redact(row: Record<string, unknown>): Record<string, unknown> {
     out[k] = REDACTED_KEYS.has(k) ? '[REDACTED]' : v;
   }
   return out;
-}
-
-export async function writeAudit(
-  tx: Tx,
-  actor: Actor,
-  e: {
-    action: string;
-    resourceType: string;
-    resourceId: string;
-    before?: unknown;
-    after?: unknown;
-    sensitiveRead?: boolean;
-  },
-): Promise<void> {
-  await tx.query(
-    `INSERT INTO audit_log
-       (tenant_id, actor_id, action, resource_type, resource_id,
-        before_data, after_data, sensitive_read)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [
-      actor.tenantId, actor.actorEmploymentId, e.action, e.resourceType, e.resourceId,
-      e.before ? JSON.stringify(e.before) : null,
-      e.after ? JSON.stringify(e.after) : null,
-      e.sensitiveRead ?? false,
-    ],
-  );
 }
 
 async function emit(tx: Tx, actor: Actor, name: string, props: unknown): Promise<void> {

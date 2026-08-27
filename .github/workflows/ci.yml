@@ -92,9 +92,18 @@ jobs:
           MISSING=$(psql -h localhost -p 5433 -U postgres -d hrms -tAqc "
             SELECT c.table_name || '.' || c.column_name
               FROM information_schema.columns c
+              JOIN information_schema.tables t
+                ON t.table_schema = c.table_schema AND t.table_name = c.table_name
               LEFT JOIN data_classification dc
                 ON dc.table_name = c.table_name AND dc.column_name = c.column_name
              WHERE c.table_schema = 'public'
+               -- Base tables only. A VIEW stores nothing, so it has no retention
+               -- clock and nothing to erase; its columns are classified on the
+               -- table underneath. Two classification rows for one stored column
+               -- drift apart. The test suite asserts separately that every view
+               -- column DOES resolve to a classified base-table column, so this
+               -- is a scope decision, not an exemption.
+               AND t.table_type = 'BASE TABLE'
                AND EXISTS (SELECT 1 FROM information_schema.columns tc
                             WHERE tc.table_name = c.table_name
                               AND tc.column_name = 'tenant_id')

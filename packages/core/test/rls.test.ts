@@ -179,8 +179,14 @@ describe('fail-closed: an unset tenant context yields ZERO rows, never all rows'
   });
 
   it('an empty-string tenant setting also yields zero rows', async () => {
+    // `current_tenant()` maps '' to NULL and every policy compares with `=`,
+    // which is NULL-safe-false. Unset and empty must both mean ZERO rows.
+    //
+    // Set with `SET LOCAL`, not `set_config`: migration 0003 revokes
+    // `set_config` from the app role (lock 1). Plain `SET` still works for this
+    // role, which is exactly WHY lock 2 exists — see the test below.
     const rows = await withoutTenant(app, async (tx: any) => {
-      await tx.query(`SELECT set_config('app.tenant_id', '', true)`);
+      await tx.query(`SET LOCAL app.tenant_id = ''`);
       const r = await tx.query(`SELECT 1 FROM person`);
       return r.rows;
     });
@@ -188,13 +194,74 @@ describe('fail-closed: an unset tenant context yields ZERO rows, never all rows'
   });
 });
 
+// ── The four tenant-identity locks ───────────────────────────────────────────
+// docs/99-decision-log.md, 2026-08-26, one-way door 1.
+//
+// RLS answers "which tenant's rows are these". It cannot answer "is the session
+// telling the truth about which tenant it is". These four assertions are that
+// second question. Deleting one re-opens a full cross-tenant breach path.
+describe('tenant-identity locks (one-way door 1)', () => {
+  it('LOCK 1 — the app role cannot call set_config', async () => {
+    await expect(
+      withoutTenant(app, async (tx: any) => {
+        await tx.query(`SELECT set_config('app.tenant_id', $1, true)`, [B.tenantId]);
+      }),
+    ).rejects.toThrow(/permission denied for function set_config/i);
+  });
+
+  it('LOCK 4 — the app role cannot run a DO block', async () => {
+    // A DO block is ONE statement, so lock 2 permits it, and `EXECUTE 'SET ...'`
+    // inside PL/pgSQL is a utility statement, so lock 1 never sees it. This is
+    // the bypass the first three locks did not close.
+    await expect(
+      withoutTenant(app, async (tx: any) => {
+        await tx.query(`DO $$ BEGIN EXECUTE 'SET app.tenant_id = ''x'''; END $$;`);
+      }),
+    ).rejects.toThrow(/permission denied for language plpgsql/i);
+  });
+
+  it('LOCK 2 — a stacked second statement cannot reach the database', async () => {
+    // The escalation path in one line: inject `; SET app.tenant_id = '<victim>'`
+    // and read another customer's data. PostgreSQL refuses multiple commands in
+    // a prepared statement, and `withTenant` hands out a Tx that can only issue
+    // prepared statements.
+    await expect(
+      withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
+        await tx.query(`SELECT 1; SET app.tenant_id = '${B.tenantId}'`);
+      }),
+    ).rejects.toThrow(/cannot insert multiple commands into a prepared statement/i);
+  });
+
+  it('LOCK 3 — the tenant cannot be changed once the transaction has one', async () => {
+    await expect(
+      withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
+        await tx.query(`SELECT begin_tenant_session($1, $2)`, [B.tenantId, A.hrEmploymentId]);
+      }),
+    ).rejects.toThrow(/tenant already set for this transaction/i);
+  });
+
+  it('the locks do not break the legitimate path', async () => {
+    // A lock that also breaks the product is not a lock, it is an outage. This
+    // is the positive control for the four assertions above.
+    const n = await withTenant(
+      app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId },
+      async (tx) => {
+        const r = await tx.query(`SELECT count(*)::int AS n FROM person`);
+        return r.rows[0].n as number;
+      });
+    expect(n, 'tenant A should see its own people').toBeGreaterThan(0);
+  });
+});
+
 describe('audit log immutability (COMP-53)', () => {
   it('the app role can INSERT into audit_log', async () => {
     await withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {
       await tx.query(
-        `INSERT INTO audit_log (tenant_id, actor_id, action, resource_type, resource_id)
-         VALUES ($1,$2,'test.write','employment',$3)`,
-        [A.tenantId, A.hrEmploymentId, A.employmentId],
+        `INSERT INTO audit_log
+           (tenant_id, actor_id, actor_kind, actor_display_name,
+            action, resource_type, resource_id, subject_person_id)
+         VALUES ($1,$2,'human','Meera Iyer','test.write','employment',$3,$4)`,
+        [A.tenantId, A.hrEmploymentId, A.employmentId, A.personId],
       );
     });
     const n = await withTenant(app, { tenantId: A.tenantId, actorEmploymentId: A.hrEmploymentId }, async (tx) => {

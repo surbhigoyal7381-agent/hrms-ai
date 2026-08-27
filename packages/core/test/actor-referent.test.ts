@@ -178,12 +178,21 @@ describe('actor_id refers to an employment, and to the employment that acted', (
   it('the database REFUSES an actor id that is not an employment', async () => {
     // Discouraged is not prevented. If this insert succeeds, every guarantee
     // above is a convention that one bad code path walks around.
+    //
+    // Every OTHER required column is supplied deliberately — actor_kind,
+    // actor_display_name, subject_person_id — so the foreign key is what is
+    // actually under test. Feature 002 added a NOT NULL that fired first and
+    // made this pass for the wrong reason: it would then have stayed green with
+    // the foreign key dropped, which is the exact defect shape this whole file
+    // was written to close.
     await expect(
       withTenant(app, hrActor(), async (tx) => {
         await tx.query(
-          `INSERT INTO audit_log (tenant_id, actor_id, action, resource_type, resource_id)
-           VALUES ($1,$2,'probe','employment',$3)`,
-          [A.tenantId, ROHAN_LOGIN_ACCOUNT, A.employmentId]);
+          `INSERT INTO audit_log
+             (tenant_id, actor_id, actor_kind, actor_display_name,
+              action, resource_type, resource_id, subject_person_id)
+           VALUES ($1,$2,'human','Probe','probe','employment',$3,$4)`,
+          [A.tenantId, ROHAN_LOGIN_ACCOUNT, A.employmentId, A.personId]);
       }),
     ).rejects.toThrow(/violates foreign key constraint/i);
 
@@ -204,9 +213,11 @@ describe('actor_id refers to an employment, and to the employment that acted', (
     await expect(
       withTenant(app, hrActor(), async (tx) => {
         await tx.query(
-          `INSERT INTO audit_log (tenant_id, actor_id, action, resource_type, resource_id)
-           VALUES ($1,$2,'probe','employment',$3)`,
-          [A.tenantId, B.employmentId, A.employmentId]);
+          `INSERT INTO audit_log
+             (tenant_id, actor_id, actor_kind, actor_display_name,
+              action, resource_type, resource_id, subject_person_id)
+           VALUES ($1,$2,'human','Probe','probe','employment',$3,$4)`,
+          [A.tenantId, B.employmentId, A.employmentId, A.personId]);
       }),
     ).rejects.toThrow(/violates foreign key constraint/i);
   });
@@ -225,6 +236,13 @@ describe('COMP-22 — erasing a person who ACTED reaches every store', () => {
       return {
         audit: await q(`SELECT count(*)::int n FROM audit_log WHERE actor_id = $1`,
           [rohanEmploymentId]),
+        // REQ-020: the access log captures the viewer's NAME at read time, so
+        // an entry can still name them after they leave. That capture is
+        // personal data about the viewer, and erasing them has to reach it.
+        auditNamed: await q(
+          `SELECT count(*)::int n FROM audit_log
+            WHERE actor_id = $1 AND actor_display_name = 'Rohan Mehta'`,
+          [rohanEmploymentId]),
         analytics: await q(`SELECT count(*)::int n FROM analytics_event WHERE actor_id = $1`,
           [rohanEmploymentId]),
         ledger: await q(`SELECT count(*)::int n FROM transparency_ledger WHERE decided_by = $1`,
@@ -235,6 +253,8 @@ describe('COMP-22 — erasing a person who ACTED reaches every store', () => {
       };
     });
     expect(before.audit, 'nothing in audit_log names Rohan — the test would be vacuous')
+      .toBeGreaterThan(0);
+    expect(before.auditNamed, 'no captured viewer name to erase — the check would be vacuous')
       .toBeGreaterThan(0);
     expect(before.analytics, 'nothing in analytics_event names Rohan — the test would be vacuous')
       .toBeGreaterThan(0);
@@ -254,6 +274,15 @@ describe('COMP-22 — erasing a person who ACTED reaches every store', () => {
         // audit_log and analytics_event: the actor link is removed outright.
         auditStillNamingRohan: await q(
           `SELECT count(*)::int n FROM audit_log WHERE actor_id = $1`, [rohanEmploymentId]),
+        auditStillSpellingHisName: await q(
+          `SELECT count(*)::int n FROM audit_log WHERE actor_display_name = 'Rohan Mehta'`, []),
+        // ...and the entry must still READ as a sentence: pseudonymised, not
+        // blanked. "Former employee, Engineering Manager — opened your record
+        // on 14 August" is the requirement; a blank row is not.
+        pseudonymised: await q(
+          `SELECT count(*)::int n FROM audit_log
+            WHERE actor_display_name = 'Former employee'
+              AND actor_kind = 'human'`, []),
         analyticsStillNamingRohan: await q(
           `SELECT count(*)::int n FROM analytics_event WHERE actor_id = $1`, [rohanEmploymentId]),
         // The ledger keeps decided_by (it is append-only and other people's
@@ -269,6 +298,10 @@ describe('COMP-22 — erasing a person who ACTED reaches every store', () => {
     });
 
     expect(after.auditStillNamingRohan, 'audit_log still links to the erased person').toBe(0);
+    expect(after.auditStillSpellingHisName, 'audit_log still spells the erased viewer name')
+      .toBe(0);
+    expect(after.pseudonymised, 'the entry was blanked instead of pseudonymised')
+      .toBeGreaterThan(0);
     expect(after.analyticsStillNamingRohan, 'analytics_event still links to the erased person')
       .toBe(0);
     expect(after.ledgerRowsStillNamingHim, 'transparency_ledger still names the erased person')
