@@ -62,3 +62,69 @@ choice was not "should our database be more secure."
 
 **Sign-off:** human ✅ · PM ✅ (position: not now, recorded in feature 002's log) ·
 Full-Stack ⬜ **countersign pending** — required by §7 before feature 002 ships.
+
+---
+
+### 2026-08-26 — Full-Stack countersign on one-way door 1: **AGREED**, with a fourth lock
+
+**hrms-fullstack-engineer, countersigning the entry above.** The §7 door stays shut, per-tenant
+roles are deferred not rejected, and the three locks land in feature 002. I agree with the ruling
+and with the reasoning, including the PM's framing that the competitor for that engineering time
+is feature 003's `COMP-20` debt. I would have made the same call.
+
+**But the three locks as written are not sufficient, and I found the gap while preparing to
+countersign rather than after shipping.**
+
+**A `DO` block is a single statement, so the extended-protocol lock does not stop it, and
+`EXECUTE 'SET …'` inside PL/pgSQL is a utility statement, so the `set_config` revoke does not stop
+it either.** Verified on postgres:16:
+
+```
+-- set_config already revoked from the role:
+SELECT set_config('app.tenant_id','x',false)
+  -> ERROR:  permission denied for function set_config          (lock 1 holding)
+
+-- but this is ONE statement, so the extended protocol permits it:
+DO $$ BEGIN EXECUTE 'SET app.tenant_id = ''pwned'''; END $$; SHOW app.tenant_id;
+  -> DO
+  -> pwned                                                       (both locks walked around)
+```
+
+**Lock 4: `REVOKE USAGE ON LANGUAGE plpgsql FROM PUBLIC`.** Verified to close it without breaking
+anything we need:
+
+```
+DO $$ BEGIN EXECUTE 'SET app.tenant_id=''pwned3'''; END $$;
+  -> ERROR:  permission denied for language plpgsql              (closed)
+
+BEGIN; SELECT begin_tenant_session('aaaaaaaa-…'); SELECT current_setting('app.tenant_id');
+  -> aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa                        (our SECURITY DEFINER setter
+                                                                  still callable — USAGE on the
+                                                                  language is needed to CREATE a
+                                                                  function, not to CALL one)
+```
+
+Migrations are unaffected: they run as the owner, and 0001's own `DO` blocks keep working.
+
+**Two conditions attached to my countersign. I am building both; if either is dropped, my
+countersign does not carry.**
+
+1. **Lock 4 ships with the other three.** Three locks without it is a lock with a documented
+   bypass, which is the same failure mode this entry exists to correct — the feature 001 log
+   named a mitigation that did not work, and the next reader stopped looking.
+2. **Revisit trigger 2 must be detectable by the type system, not only by a CI grep.** The entry
+   makes "a single parameterless query reaching the database outside the wrapper" the signal that
+   roles stop being optional. A grep over source text cannot see a query assembled at runtime, so
+   the trigger would fire late or not at all. `Tx` is currently `pg.PoolClient`, which exposes the
+   raw client to every caller in `packages/core`. I am narrowing `Tx` to an interface that does
+   not carry the unsafe call at all, so the wrapper is the only reachable path by construction and
+   the grep becomes a second line rather than the only one.
+
+**What I am not claiming.** These four locks close the paths I have tested. They do not make the
+GUC unforgeable — `SET` is still a legal statement for this role, and any future code path that
+reaches the database outside the wrapper re-opens it. That is precisely why per-tenant roles are
+recorded as deferred rather than solved, and why trigger 2 matters more than trigger 1: trigger 1
+is a customer we may never get, trigger 2 is a Tuesday.
+
+**Countersigned. Sign-off is now: human ✅ · PM ✅ · Full-Stack ✅ (conditional on locks 1–4 and
+the `Tx` narrowing landing together in feature 002).**

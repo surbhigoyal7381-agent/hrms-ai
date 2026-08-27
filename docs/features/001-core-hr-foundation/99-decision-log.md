@@ -181,3 +181,54 @@ run against the shipped code: **5 failed / 5**. After the fix: **5 passed**. Ful
 **93 passed** (76 `packages/core`, 17 `packages/ai`), up from 88. Migration verified applied
 from scratch, rolled back via its documented down path, and its pre-flight guard verified to
 refuse a database holding a bad actor id.
+
+### 2026-08-26 — CORRECTION: this log's named `app.tenant_id` mitigation does not work
+
+**Correcting the entry of 2026-08-24, "Multi-tenancy: shared schema + FORCE RLS", and the
+2026-08-25 accepted-debt item 3.** Both record the same open risk and name the same candidate
+fixes: *"A `SECURITY DEFINER` setter or per-tenant roles would close this."*
+
+**The `SECURITY DEFINER` setter does not close it.** Appended, not edited, so the wrong belief
+stays visible — the next reader needs to see what was believed as well as what is true.
+
+Verified against postgres:16 while designing feature 002:
+
+```
+-- 1. The obvious lockdown reports success and does nothing.
+REVOKE SET ON PARAMETER "app.tenant_id" FROM PUBLIC;
+  -> REVOKE
+SELECT parname FROM pg_parameter_acl;
+  -> (0 rows)                      no ACL entry was created
+SET app.tenant_id = '6666…';       -- as the app role
+  -> SET                           it was never constrained
+
+-- 2. Revoking the function works, and is not enough.
+REVOKE EXECUTE ON FUNCTION set_config(text,text,boolean) FROM hrms_app;
+SELECT set_config('app.tenant_id','x',false);
+  -> ERROR: permission denied for function set_config
+SET app.tenant_id = '5555…';
+  -> SET                           plain SET is a utility statement, not a function call
+
+-- 3. And a DO block walks around both, because it is ONE statement.
+DO $$ BEGIN EXECUTE 'SET app.tenant_id = ''pwned'''; END $$;
+  -> DO                            -> app.tenant_id is now 'pwned'
+```
+
+**Why the original belief was wrong.** A `SECURITY DEFINER` setter secures the *legitimate* path.
+It does nothing about the illegitimate one, because it was never the only writer. `GRANT`/`REVOKE
+SET ON PARAMETER` — the thing that would make it the only writer — **does not constrain a custom
+placeholder variable** in PostgreSQL 16. Anyone who applies that `REVOKE`, sees the `REVOKE`
+acknowledgement and does not check `pg_parameter_acl` will believe the hole is closed.
+
+**What actually constrains anything here:** `SET ROLE` is enforced by role membership
+(`permission denied to set role "tenant_b"`), which is why per-tenant roles — the *other* fix this
+log named — remain the durable answer. That half of the original entry was right.
+
+**What was decided instead**, with the full reasoning, sign-offs and the evidence above:
+`docs/99-decision-log.md`, entry of 2026-08-26, one-way door 1 — four locks in feature 002,
+per-tenant roles deferred not rejected, countersigned by this agent with the fourth lock as a
+condition.
+
+**Nothing in feature 001 needs re-fixing.** The risk was correctly recorded as open and was
+correctly judged unreachable while no endpoint existed. Only the *proposed mitigation* was wrong,
+and it was never built.
