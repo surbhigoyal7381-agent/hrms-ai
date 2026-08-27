@@ -68,3 +68,6 @@ transparency_ledger.effective_from
 transparency_ledger.ai_involved
 employment_version.valid_from
 employment_version.valid_to
+tenant_record_view_setting.id
+tenant_record_view_setting.tenant_id
+tenant_record_view_setting.changed_at
