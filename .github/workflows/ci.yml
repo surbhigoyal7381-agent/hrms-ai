@@ -40,6 +40,16 @@ jobs:
         run: pnpm -r test
         env: { PGHOST: localhost, PGPORT: '5433' }
 
+      # A route that does not declare who may reach it must never get as far as
+      # a deployment. This is the same script `prebuild` and `prestart` run, so
+      # CI is checking the thing that actually guards the server rather than a
+      # separate copy of the rule.
+      - name: Route manifest declares every route
+        run: pnpm --filter @hrms/web check:routes
+
+      - name: Web builds
+        run: pnpm --filter @hrms/web build
+
   ai-gateway-boundary:
     # All model access goes through packages/ai. Nothing else may call a model
     # API directly (docs/06-technology-decisions.md §The AI decision).

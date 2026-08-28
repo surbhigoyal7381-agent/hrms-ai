@@ -1,0 +1,22 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalEnv": ["NEXT_TELEMETRY_DISABLED", "DO_NOT_TRACK", "PGHOST", "PGPORT"],
+  "tasks": {
+    "typecheck": {
+      "dependsOn": ["^typecheck"],
+      "outputs": []
+    },
+    "check:routes": {
+      "outputs": []
+    },
+    "build": {
+      "dependsOn": ["^build", "typecheck", "check:routes"],
+      "outputs": [".next/**", "!.next/cache/**"]
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": [],
+      "cache": false
+    }
+  }
+}

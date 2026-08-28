@@ -11,3 +11,7 @@ package-lock.json
 # Handoff artefacts — the branch is on the remote; these are redundant copies.
 core-hr-foundation.bundle
 core-hr-foundation.patch
+
+# next-env.d.ts is NOT ignored: tsconfig includes it and `pnpm typecheck`
+# runs before `next build` regenerates it, so CI needs it committed.
+*.tsbuildinfo

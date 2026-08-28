@@ -1,0 +1,29 @@
+{
+  "name": "@hrms/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:routes": "node src/check-routes.ts",
+    "dev": "next dev",
+    "prebuild": "node src/check-routes.ts",
+    "build": "next build",
+    "prestart": "node src/check-routes.ts",
+    "start": "next start",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "pnpm typecheck && vitest run"
+  },
+  "dependencies": {
+    "@hrms/core": "workspace:*",
+    "next": "^16.3.3",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
