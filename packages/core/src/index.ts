@@ -7,6 +7,7 @@
  */
 export {
   withTenant,
+  withTenantForResolution,
   asEmploymentId,
   type Actor,
   type EmploymentId,
@@ -49,6 +50,12 @@ export {
   type AccessLogPage,
   type AccessLogQuery,
 } from './access-log.js';
+
+export {
+  resolveRequestContext,
+  type RequestContext,
+  type Lifecycle,
+} from './request-context.js';
 
 export {
   assertRouteManifest,

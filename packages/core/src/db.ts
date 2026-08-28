@@ -111,6 +111,48 @@ function extendedOnly(client: pg.PoolClient): Tx {
  * Together: on the legitimate path the tenant is set once and cannot change; on
  * an injected path there is no statement that can change it.
  */
+/**
+ * A tenant-scoped transaction with NO ACTOR, for the one step that cannot have
+ * one: working out who the caller is.
+ *
+ * The ordinary `withTenant` needs an `Actor`, and the actor is precisely what
+ * identity resolution is trying to establish. The tenant comes from the request
+ * host — sign-in addresses are tenant-specific already, for REQ-031 — and the
+ * subject is then resolved WITHIN that tenant, so a subject belonging to
+ * another customer resolves to nothing rather than to a foreign employee.
+ *
+ * Deliberately narrow, and deliberately awkward to misuse: it hands out a `Tx`
+ * but no `Actor`, so nothing that requires one can be called from inside it.
+ * Every audit write requires one. If you find yourself wanting an actor here,
+ * you are past identity resolution and want `withTenant`.
+ */
+export async function withTenantForResolution<T>(
+  pool: pg.Pool,
+  tenantId: string,
+  fn: (tx: Tx) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  const tx = extendedOnly(client);
+  try {
+    await tx.query('BEGIN');
+    // NULL actor: `begin_tenant_session` accepts it, and `app.actor_employment_id`
+    // is left empty rather than borrowed from somebody.
+    await tx.query('SELECT begin_tenant_session($1, NULL)', [tenantId]);
+    const result = await fn(tx);
+    await tx.query('COMMIT');
+    return result;
+  } catch (err) {
+    try {
+      await tx.query('ROLLBACK');
+    } catch (rollbackErr) {
+      (err as { rollbackError?: unknown }).rollbackError = rollbackErr;
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export async function withTenant<T>(
   pool: pg.Pool,
   actor: Actor,

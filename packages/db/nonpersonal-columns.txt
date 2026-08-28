@@ -71,3 +71,6 @@ employment_version.valid_to
 tenant_record_view_setting.id
 tenant_record_view_setting.tenant_id
 tenant_record_view_setting.changed_at
+identity_link.id
+identity_link.tenant_id
+identity_link.created_at

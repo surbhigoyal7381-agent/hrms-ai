@@ -224,7 +224,29 @@ Four things fall out of one round trip: **who**, **which tenant**, **is the reco
 RULE-001's "unset", and the resolver maps `NULL → false` at exactly one place.
 
 `identity_link` is a new table mapping a Keycloak subject to a `person`. It is needed because
-nothing today connects an authenticated user to an employee. It is in migration 0003.
+nothing today connects an authenticated user to an employee. **It is in migration 0005.**
+
+> **Correction, 2026-08-28.** This paragraph previously said "It is in migration 0003." That was
+> wrong — 0003 never contained it, and by the time anyone read the sentence 0003 was committed and
+> could not be edited. Corrected here rather than quietly, because the next reader would otherwise
+> have gone looking for a table that was not there and concluded the schema was broken.
+
+**Two corrections to the query above, found when building it rather than when writing it:**
+
+1. **`t.default_timezone` and the work-calendar lateral join do not exist.** There is no timezone
+   column on `tenant` and no work-calendar table anywhere in this product. The resolution therefore
+   returns the four answers it actually has — who, which tenant, is the record view on, where in
+   the exit lifecycle — and **timezone resolution is deferred** to the slice that needs it. The
+   access log already takes the timezone as a parameter, so nothing is blocked. RULE-009's fallback
+   ("use the tenant default and say which") still needs that column; it is not built yet.
+
+2. **The lookup cannot run inside an ordinary tenant transaction**, because the tenant is one of
+   the things it resolves. `withTenant` needs a tenant before it opens. Resolved by taking the
+   tenant from the request host — the sign-in address is already tenant-specific for REQ-031 — and
+   resolving the subject *within* that tenant. A subject belonging to another tenant then resolves
+   to nothing, which is the correct answer and a stronger one than a global lookup would give.
+   `withTenantForResolution` exists for that one step and grants **no actor**, so nothing that
+   requires an `Actor` — every audit write — can be done from it.
 
 ### The route manifest — how REQ-022's allowlist avoids rotting
 
