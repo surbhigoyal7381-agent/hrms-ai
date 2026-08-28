@@ -171,3 +171,20 @@ REQ-031 asks for responses byte-identical *"including any nonce or token positio
 **One product constraint attaches, and it is the only thing I am adding.** If an entry can exist for an export that failed, then **the access log must not present a failed export as a completed download.** Aisha reading *"you downloaded your data on 26 Aug"* for a file she never received will phone HR, and she will be right to. The engineer already records the outcome on `export_artefact`; my requirement is that whatever Aisha sees distinguishes the two. → **hrms-business-analyst** for the wording, **hrms-fullstack-engineer** for the mechanism.
 
 **Everything else about Q-21 goes back to the engineer, with the reviewer as the gate.**
+
+### 2026-08-28 — RULE-001 divergence approved: a broken system says "broken", not "switched off"
+**Raised by:** hrms-fullstack-engineer, during slice 2, as a considered divergence rather than an oversight.
+**Approved by:** the human, 2026-08-28.
+
+**What the rule said.** RULE-001: if the setting store cannot be read, treat the feature as off and return 403.
+
+**Why that is wrong.** A 403 renders the "your organisation has not turned this on" screen. That sentence is a statement about the employer's choice. When the truth is that our own store is unreachable, the sentence is false — we would be telling Aisha her employer switched something off when her employer did nothing of the kind. It is a small lie told at scale, on the one screen whose entire purpose is that the company is being straight with her.
+
+**Decision.** The failure propagates as a 503 "something went wrong, try again" instead. The safety property RULE-001 exists to protect is preserved — an unreadable setting NEVER grants access — but the reason shown to the employee is true.
+
+**The distinction worth keeping.** Fail-closed is about *access*: when we do not know, nobody gets in. It is not about *explanation*: when we do not know why, we must not invent a reason. RULE-001 conflated the two. This separates them.
+
+**Consequences:**
+- The BA should reflect this in RULE-001 rather than leaving the requirement and the code disagreeing. Raised as a note to hrms-business-analyst, non-blocking.
+- The reviewer sees a deliberate, approved divergence, not a defect.
+- `settings.ts` already propagates rather than swallowing the error; no code change needed.
