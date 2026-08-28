@@ -206,3 +206,95 @@ REQ-031 asks for responses byte-identical *"including any nonce or token positio
 - **A uniform pre-authentication response**, so an unknown address is indistinguishable from a real one. Closes the guessing route. **This one has a design consequence:** REQ-031's closed-window page renders *that tenant's* data-protection contact to an unauthenticated caller, which is only safe if the address is already known to be real. Adopting it later means REQ-031 needs re-deriving.
 
 **Consequence for the build:** migration 0006's opaque slug is not what ships. The address carries a readable tenant identifier. `resolveRequestContext` still takes the tenant from the request host, so a subject from another customer still resolves to nothing — that property is unaffected.
+
+### 2026-08-28 — Q-19 IMPLEMENTED: migration 0006 rewritten, opaque slug deleted
+**By:** hrms-fullstack-engineer, slice 3c, carrying out the human's ruling of the same day.
+
+`packages/db/migrations/0006_tenant_signin_slug.sql` — the opaque 32-hex-character slug —
+was **deleted, not amended**. It had never been committed and never applied anywhere. In
+its place, `0006_tenant_signin_address.sql`: `tenant.signin_slug` is a readable DNS label,
+`northwind`, backfilled from the tenant name.
+
+**Three choices inside it that were mine, recorded because they are not in the ruling:**
+
+1. **No database default on the column.** A `DEFAULT` would hand every tenant — existing
+   and every future one — an address nobody chose. Provisioning must state one, and a
+   missing slug is a loud failure at provisioning time rather than a surprising address
+   a customer discovers. The consequence is real and landed immediately: the test fixture
+   in `packages/core/test/setup.ts` broke and had to be updated, because the fixture *is*
+   provisioning.
+2. **Uppercase is refused by CHECK, not folded.** Host names are case-insensitive, so
+   storing `Northwind` and `northwind` as two rows would be two tenants sharing one
+   address, and the UNIQUE constraint would not see it. The resolver folds the *input*
+   instead, so an employee who types a capital letter still arrives.
+3. **A reserved-label list** (`www`, `api`, `admin`, `auth`, `login`, …). A customer
+   called "API" taking `api.<product>.app` would shadow our own address space, and the
+   failure would look like an outage rather than a naming collision.
+
+**What is unchanged by the ruling and worth restating:** `tenant_id_for_signin_slug` is
+still `SECURITY DEFINER`, `STABLE`, fixed `search_path`, and returns **one uuid and
+nothing else** — no name, no region, no row, no listing. The ruling accepted that the
+address space is enumerable *from outside*; it did not make the customer list readable
+*from inside*, and an application role compromised through an injection defect still
+learns only one yes/no answer at a time. There is a test asserting the application role
+reads exactly one row from `tenant` and cannot change a `signin_slug`.
+
+The migration was applied forward, rolled back and re-applied on postgres:16, including
+the label-collision path. Unlike the opaque slug, a re-run reproduces the **same** address
+for an unchanged name; the rollback note says so, and says that a slug set by provisioning
+to something other than the derived label is not recoverable and must be copied out first.
+
+### 2026-08-28 — Sign-out goes to Keycloak WITHOUT `id_token_hint`, and why that is a cost not a shortcut
+**By:** hrms-fullstack-engineer, slice 3c. **Non-blocking. Raised so it is not discovered later.**
+
+Sign-out clears our cookie **and** redirects to the issuer's `end_session_endpoint`, which
+is what the design note promised. It sends `client_id` and `post_logout_redirect_uri`, and
+**not** `id_token_hint`.
+
+**Why not:** we do not keep the ID token. The session cookie carries `{ sub, iat, sid }`
+and nothing else — the property REQ-016 and REQ-022 rest on — and there is no server-side
+session store yet to put a token in. Putting the ID token in the cookie to make sign-out
+tidier would trade a requirement for a convenience.
+
+**What it costs Aisha:** without the hint, an issuer typically asks the person to confirm
+the sign-out rather than performing it silently. Sign-out still ends the Keycloak session;
+it takes one extra tap. `[UNVERIFIED — this is Keycloak's documented behaviour as I
+understand it, not something I have observed. Confirm against the deployed realm.]`
+
+**The fix, and it is not extra work:** a server-side session record keyed on `sid`, which
+`SEC-09`'s 12-hour and 30-minute lifetime enforcement needs anyway. One piece of work,
+scheduled for slice 3d. Recorded rather than hidden behind a working-looking redirect.
+
+### 2026-08-28 — Sign-out is a `public` route, deliberately
+**By:** hrms-fullstack-engineer, slice 3c. **A judgement call the reviewer should check.**
+
+`POST /signin/out` declares `auth: 'public'`. Sign-out has to work for a session we cannot
+read — expired, sealed with a rotated key, belonging to somebody whose identity link was
+disabled this morning. Requiring `employee` would mean the people most likely to need to
+sign out, on a shared machine with something already wrong, are exactly the ones who
+cannot.
+
+**The cost:** a cross-site request can force somebody to be signed out. That is a
+nuisance, not a disclosure — the route returns no data and grants nothing. It is
+`POST`-only so a bare `<img>` tag cannot trigger it, and `SameSite=Lax` withholds the
+session cookie from a cross-site form post, so the forced sign-out does not even reach a
+session. **If the reviewer disagrees, the change is one line plus a "sign out anyway"
+path for unreadable sessions**, and I would rather be argued out of it than have it pass
+unnoticed.
+
+### 2026-08-28 — NOT VERIFIED AGAINST KEYCLOAK, and this must not be read as done
+**By:** hrms-fullstack-engineer, slice 3c. **Recorded at the human's instruction.**
+
+The whole sign-in flow is tested against a **synthetic issuer** — our own signing key,
+JWKS and discovery document — and never against a real Keycloak. That was deliberate and
+I agree with it: every attack worth testing needs an issuer that will misbehave on demand,
+and a real Keycloak will not mint an `alg: none` token, sign with the wrong key, or echo
+last week's nonce.
+
+**So "sign-in works" means "the relying-party logic is correct against a conforming issuer
+and refuses a hostile one". It does not mean sign-in works against our identity provider.**
+The unverified list is in the design note under *What is not verified*; the two most
+likely to bite on day one are **the discovery document's `issuer` matching ours exactly,
+trailing slash included** (we refuse a mismatch, correctly, and it is a plausible first
+failure) and **reading the `Host` header behind a proxy** — a trusted-proxy decision is
+required before this is deployed, or a rewritten `Host` resolves the wrong tenant or none.

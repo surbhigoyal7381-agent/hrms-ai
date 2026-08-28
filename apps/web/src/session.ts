@@ -21,12 +21,11 @@
  * trading a correctness property for a millisecond, and the query it would save
  * is a single indexed lookup that we make anyway.
  */
-import {
-  createCipheriv,
-  createDecipheriv,
-  randomBytes,
-  timingSafeEqual,
-} from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+// One implementation of AES-256-GCM sealing, shared with the pending-sign-in
+// cookie. Cryptographic code written twice is where the second copy reuses a
+// nonce or forgets the tag.
+import { sealJson, unsealJson, loadSealKey, SealKeyError } from './sealed.ts';
 
 /** Everything the cookie is allowed to contain. */
 export interface SessionPayload {
@@ -47,11 +46,8 @@ export const ALLOWED_SESSION_KEYS: readonly string[] = Object.freeze(['sub', 'ia
 
 export const SESSION_COOKIE_NAME = 'hrms_session';
 
-const ALGORITHM = 'aes-256-gcm';
-const IV_BYTES = 12;
-const TAG_BYTES = 16;
-
-export class SessionKeyError extends Error {}
+/** Kept as its own name so existing callers and tests do not change. */
+export { SealKeyError as SessionKeyError };
 export class SessionDecodeError extends Error {}
 
 /**
@@ -63,20 +59,7 @@ export class SessionDecodeError extends Error {}
  * in something else entirely.
  */
 export function loadSessionKey(env: NodeJS.ProcessEnv = process.env): Buffer {
-  const raw = env.SESSION_COOKIE_KEY;
-  if (!raw) {
-    throw new SessionKeyError(
-      'SESSION_COOKIE_KEY is not set. Generate one with:\n' +
-      "  node -e \"console.log(require('node:crypto').randomBytes(32).toString('base64'))\"",
-    );
-  }
-  const key = Buffer.from(raw, 'base64');
-  if (key.length !== 32) {
-    throw new SessionKeyError(
-      `SESSION_COOKIE_KEY must decode to 32 bytes, got ${key.length}.`,
-    );
-  }
-  return key;
+  return loadSealKey('SESSION_COOKIE_KEY', env);
 }
 
 export function newSession(sub: string): SessionPayload {
@@ -104,13 +87,7 @@ export function sealSession(payload: SessionPayload, key: Buffer): string {
     iat: payload.iat,
     sid: payload.sid,
   };
-  const iv = randomBytes(IV_BYTES);
-  const cipher = createCipheriv(ALGORITHM, key, iv);
-  const ciphertext = Buffer.concat([
-    cipher.update(JSON.stringify(body), 'utf8'),
-    cipher.final(),
-  ]);
-  return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64url');
+  return sealJson(body, key);
 }
 
 /**
@@ -122,30 +99,15 @@ export function sealSession(payload: SessionPayload, key: Buffer): string {
  * the difference being observable.
  */
 export function unsealSession(value: string, key: Buffer): SessionPayload | null {
-  try {
-    const raw = Buffer.from(value, 'base64url');
-    if (raw.length <= IV_BYTES + TAG_BYTES) return null;
-
-    const iv = raw.subarray(0, IV_BYTES);
-    const tag = raw.subarray(IV_BYTES, IV_BYTES + TAG_BYTES);
-    const ciphertext = raw.subarray(IV_BYTES + TAG_BYTES);
-
-    const decipher = createDecipheriv(ALGORITHM, key, iv);
-    decipher.setAuthTag(tag);
-    const json = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
-
-    const parsed: unknown = JSON.parse(json);
-    if (typeof parsed !== 'object' || parsed === null) return null;
-    const p = parsed as Record<string, unknown>;
-    if (typeof p.sub !== 'string' || typeof p.iat !== 'number' || typeof p.sid !== 'string') {
-      return null;
-    }
-    // Only the three fields are returned, whatever the ciphertext held. A
-    // cookie carrying an extra claim cannot smuggle it into the request.
-    return { sub: p.sub, iat: p.iat, sid: p.sid };
-  } catch {
+  const parsed = unsealJson(value, key);
+  if (parsed === null) return null;
+  const p = parsed as Record<string, unknown>;
+  if (typeof p.sub !== 'string' || typeof p.iat !== 'number' || typeof p.sid !== 'string') {
     return null;
   }
+  // Only the three fields are returned, whatever the ciphertext held. A cookie
+  // carrying an extra claim cannot smuggle it into the request.
+  return { sub: p.sub, iat: p.iat, sid: p.sid };
 }
 
 /** Constant-time compare, for anything that ever compares session ids. */

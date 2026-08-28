@@ -8,6 +8,9 @@
 export {
   withTenant,
   withTenantForResolution,
+  resolveTenantIdForSigninSlug,
+  createAppPool,
+  type AppPool,
   asEmploymentId,
   type Actor,
   type EmploymentId,

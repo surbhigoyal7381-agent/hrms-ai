@@ -186,3 +186,64 @@ export async function withTenant<T>(
     client.release();
   }
 }
+
+/**
+ * Which customer is this request for — the one lookup that happens before any
+ * tenant is known.
+ *
+ * Everything else in this package runs inside `withTenant` or
+ * `withTenantForResolution`, both of which need a tenant id before they open.
+ * An arriving request has a host name, not a tenant id, and `tenant` is itself
+ * row-level-secured with `USING (id = current_tenant())` — so reading it
+ * requires already knowing the answer.
+ *
+ * `tenant_id_for_signin_slug` (migration 0006) is the SECURITY DEFINER way
+ * through, and it is deliberately narrow: it returns ONE uuid for an exact
+ * label, and no name, no region, no row and no listing.
+ *
+ * This function hands back a uuid, never a `Tx`. That is the point. A helper
+ * that returned a transaction with no tenant set would be a hole straight
+ * through the four locks of docs/99-decision-log.md — every RLS policy would
+ * see an empty `app.tenant_id` and the caller would be one forgotten line away
+ * from a cross-tenant read. There is nothing to forget here, because there is
+ * nothing to hold.
+ */
+export async function resolveTenantIdForSigninSlug(
+  pool: pg.Pool,
+  slug: string,
+): Promise<string | null> {
+  if (typeof slug !== 'string' || slug.trim().length === 0) return null;
+  const client = await pool.connect();
+  try {
+    const tx = extendedOnly(client);
+    const r = await tx.query<{ tenant_id: string | null }>(
+      'SELECT tenant_id_for_signin_slug($1) AS tenant_id',
+      [slug],
+    );
+    return r.rows[0]?.tenant_id ?? null;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * The application's connection pool.
+ *
+ * Built here rather than in `apps/web` so the transport layer never imports the
+ * database driver. That boundary is the reason `apps/web` holds no SQL: a layer
+ * that cannot reach `pg` cannot open a connection outside the wrapper, and the
+ * wrapper is what forces the extended query protocol that LOCK 2 depends on.
+ *
+ * The connection string names `hrms_app`, a NOBYPASSRLS role. Connecting as the
+ * owner would silently disable every row-level-security policy in the product —
+ * `FORCE ROW LEVEL SECURITY` protects against the owner, but only the table
+ * owner, and a superuser bypasses everything.
+ */
+export type AppPool = pg.Pool;
+
+export function createAppPool(connectionString: string, max = 10): AppPool {
+  if (typeof connectionString !== 'string' || connectionString.trim().length === 0) {
+    throw new TypeError('createAppPool needs a connection string.');
+  }
+  return new pg.Pool({ connectionString, max });
+}

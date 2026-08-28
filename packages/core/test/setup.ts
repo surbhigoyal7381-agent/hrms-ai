@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -58,6 +59,8 @@ export interface SeededTenant {
   /** Meera, the HR admin who decides things. A REAL employment row. */
   hrEmploymentId: EmploymentId;
   hrPersonId: string;
+  /** The readable sign-in address label (migration 0006). */
+  signinSlug: string;
 }
 
 /**
@@ -82,8 +85,18 @@ export async function seedTenant(
 ): Promise<SeededTenant> {
   const c = await admin.connect();
   try {
+    // `signin_slug` has NO database default (migration 0006), so provisioning
+    // has to state the address. The fixture is provisioning, so it states one.
+    // Derived from the name the same way the migration's backfill derives it,
+    // with a random suffix because a suite that seeds two tenants called
+    // "Northwind" in one database would otherwise collide on the unique index
+    // and fail somewhere that looks nothing like the cause.
+    const slug =
+      (opts.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'tenant')
+        .slice(0, 20) + '-' + randomUUID().slice(0, 8);
     const t = await c.query(
-      `INSERT INTO tenant (name, region) VALUES ($1,$2) RETURNING id`, [opts.name, opts.region]);
+      `INSERT INTO tenant (name, region, signin_slug) VALUES ($1,$2,$3) RETURNING id`,
+      [opts.name, opts.region, slug]);
     const tenantId = t.rows[0].id;
 
     await c.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId]);
@@ -148,6 +161,7 @@ export async function seedTenant(
     return {
       tenantId, orgUnitId, employmentId, hrEmploymentId, hrPersonId,
       personId: p.rows[0].id,
+      signinSlug: slug,
     };
   } finally {
     c.release();

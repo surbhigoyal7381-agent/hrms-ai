@@ -1250,3 +1250,576 @@ derived from the entries; and whether the post-exit test enumerates routes or li
 only. **Blocking release, not build:** Q-02 (counsel on the panel strings, per market), Q-11.
 **Needs a human decision before this ships, not after:** the `app.tenant_id` follow-up on
 per-tenant roles, and Q-19 on the sign-in address shape.
+
+---
+
+# Slice 3c — the sign-in flow (added 2026-08-28)
+
+**Tier: L, continued.** This is the authentication half of the transport layer.
+It touches auth, so it was never eligible for tier S.
+
+## THE HEADLINE, BEFORE ANYTHING ELSE
+
+**None of this has been run against a real Keycloak.** Not once. The whole flow is
+tested against a *synthetic issuer* whose signing key, JWKS and discovery document are
+ours, in `apps/web/test/support/synthetic-issuer.ts`.
+
+Read "sign-in works" as **"the relying-party logic is correct against a conforming
+issuer, and refuses a hostile one."** It is not "sign-in works against our identity
+provider." What has NOT been exercised is listed under *What is not verified* below.
+
+That was a deliberate instruction and I agree with it: every attack worth testing here
+needs an issuer that will **misbehave on demand**. A real Keycloak will not mint an
+`alg: none` token, will not sign with the wrong key, and will not echo last week's
+nonce — so the tests that matter most could not be written against it at all.
+
+## What Aisha can do after this ships that she could not before
+
+She can sign in. She goes to `northwind.thrive.app`, is bounced to her employer's
+Keycloak, types her password there, comes back, and has a session — **provided somebody
+in HR has linked her login to her employee record.** If nobody has, she is refused and
+no record is created for her. Signing out ends her session here **and** at Keycloak, so
+the next person on a shared phone does not land in her account.
+
+## Requirement IDs covered
+
+REQ-016 (nothing authorisation-relevant in the cookie) · REQ-022 (same, for the exit
+window) · REQ-031 (the sign-in address is tenant-specific, and readable per Q-19) ·
+`SEC-01` · `SEC-02` · `SEC-09` (partially — the sign-out half; lifetime enforcement is
+slice 3d).
+
+## What I kept and what I discarded from the previous session
+
+| Partial file | Decision |
+|---|---|
+| `src/oidc/pkce.ts` | **Kept unchanged.** S256 hard-coded rather than configurable, three separate one-time values, constant-time comparison, and a `returnTo` allowlist. All correct. It had no tests; it has 15 now |
+| `src/oidc/verify.ts` | **Kept unchanged.** `jose` with a relying-party algorithm allowlist, `iss`/`aud`/`exp`, and the nonce checked *before* the signature so a caller that lost the nonce fails loudly. 19 tests now |
+| `src/oidc/flow.ts` | **Kept, unchanged.** State checked before the code is exchanged, which is the ordering that matters |
+| `src/oidc/config.ts` | **Kept, unchanged.** The discovery document's own `issuer` is compared to the configured one, which stops a redirected or cached document pointing us at somebody else's endpoints |
+| `packages/db/migrations/0006_tenant_signin_slug.sql` | **DELETED and rewritten.** See below |
+| `apps/web/package.json` + lockfile (`jose ^6.2.10`) | **Kept.** Verified: `jose@6.2.10` is installed, MIT, and every function used (`jwtVerify`, `createLocalJWKSet`, `SignJWT`, `exportJWK`, `generateKeyPair`, `decodeProtectedHeader`) exists in that exact version — checked by running it, not by reading documentation |
+
+The previous session's code was good. What it lacked was a single test and a resolved
+Q-19.
+
+## Migration 0006: the opaque slug is gone
+
+The old file gave every tenant a random 32-hex-character address and a CHECK constraint
+forbidding anything else. **The human overruled that on 2026-08-28.** Deleted, and
+replaced with `0006_tenant_signin_address.sql`:
+
+- `tenant.signin_slug`, **readable**: `northwind`, not `9f2c…`.
+- **No database default.** A default would hand every tenant — existing and future — an
+  address nobody chose. Provisioning must state one, and the fixture in
+  `packages/core/test/setup.ts` was updated because it is provisioning.
+- Backfilled from `tenant.name` (`"Northwind Trading Co."` → `northwind-trading-co`),
+  with a short id suffix where two customers derive the same label, and a
+  `tenant-<id>` fallback for a name that derives to nothing.
+- CHECK: a legal DNS label, lowercase only (uppercase is *refused*, not folded — two
+  rows differing only in case would be two tenants sharing one address and the UNIQUE
+  constraint would not see it), 3–62 characters, plus a reserved-label list so a
+  customer called "API" cannot shadow our own address space.
+- `tenant_id_for_signin_slug(text)` is kept from the old file — `SECURITY DEFINER`,
+  `STABLE`, fixed `search_path`, returning **one uuid and nothing else**. That
+  narrowness still matters after Q-19: the ruling accepted the address space is
+  enumerable *from outside*; it did not make the customer list readable from inside.
+
+**Tested forward, backward and forward again on postgres:16**, including the collision
+path and the re-apply — and unlike the opaque slug, re-running the forward migration
+reproduces the *same* address for an unchanged name, which the rollback note now says.
+
+**What the readable address costs, restated so it is not lost:** any company can be
+confirmed or denied in bulk, by guessing and — needing nothing from us — through
+Certificate Transparency. The decision log records both, and records the two mitigations
+offered and not taken (one wildcard certificate; a uniform pre-authentication response).
+**Nothing about tenant isolation depends on the address being unguessable.**
+
+## The seven things that had to be right
+
+Each is a place where the broken version and the working version are indistinguishable
+from the outside.
+
+### 1. PKCE with S256, never `plain`
+
+`code_challenge_method` is a `const` in `pkce.ts`, typed as a literal. It is not a
+parameter, not configuration, not negotiated. There is no `plain` to select.
+
+The test asserts the challenge equals an **independently computed**
+`BASE64URL(SHA256(ASCII(verifier)))`, and pins RFC 7636's own worked example.
+`expect(challengeFor(v)).toBe(challengeFor(v))` would pass just as happily with a
+`plain` implementation on both sides.
+
+### 2. `state` — missing, wrong, and replayed
+
+Missing and wrong are one comparison, in constant time. **Replayed is not**, and this is
+the part that is usually got wrong: a replayed callback carries the *correct* `state` by
+construction, so no comparison can catch it.
+
+What catches it is that the pending record is **single-use**. It lives in its own sealed,
+short-lived cookie (`hrms_signin`), separate from the session — at this point in the flow
+nobody has authenticated, and writing these values into the session cookie would mean
+issuing a session cookie to an unauthenticated caller. The callback route clears that
+cookie on **every** exit — success, refusal, or exception — so a second arrival resolves
+`pending` to `null` and is refused as `NO_PENDING_AUTHORIZATION`.
+
+The state check also runs **before the code is exchanged**. A forged callback therefore
+never burns a real authorization code, and we never hold tokens an attacker chose for us.
+There is a test asserting zero exchanges happened.
+
+### 3. `nonce` validated against the one issued
+
+Checked against the value sealed into the pending cookie. And checked **before** the
+signature: a caller that lost the nonce somewhere in the flow would otherwise receive a
+token that verifies perfectly, with the replay defence silently absent and nothing to say
+it had stopped being there. That path throws `NONCE_NOT_ISSUED`.
+
+### 4. The signature actually verified, with `iss`, `aud` and `exp`
+
+Delegated to `jose`, never hand-rolled. Tested against a token signed by a **different key
+carrying the same `kid`**, a token whose payload was edited after signing, a token from a
+different issuer, one minted for a different client, and expired tokens on both sides of
+the clock tolerance.
+
+### 5. `alg: none` refused, and the wrong key or algorithm refused
+
+The allowlist is `['RS256','ES256']`, frozen, and passed to the verifier by us. **The
+relying party decides which algorithms are acceptable, never the token.**
+
+Two tokens are minted by hand in the harness because `jose` will not produce them —
+which is a point in its favour and a problem for a test that must prove we refuse them:
+
+- **`alg: none`** — header, payload, empty signature. A verifier that honours the token's
+  own `alg` accepts it, and the resulting sign-in looks entirely normal.
+- **The algorithm-confusion token** — `alg: HS256`, HMAC-signed with the issuer's own
+  **public** key as the shared secret. A verifier that picks the algorithm from the header
+  and then looks up "the issuer's key" verifies it successfully, using a key anybody can
+  download.
+
+### 6. No auto-provisioning — three independent locks
+
+**Authenticating is not the same as being an employee.** Keycloak can prove somebody
+controls an account in the realm. It cannot say they are one of this customer's employees;
+that fact lives in `identity_link` and nowhere else.
+
+| # | The lock | What it stops |
+|---|---|---|
+| 1 | `finishSignIn` denies when the lookup returns `null` | The ordinary case |
+| 2 | **`identity_link` has INSERT, UPDATE and DELETE revoked from `hrms_app`** (migration 0005) | Somebody "fixing" lock 1 by creating the missing row. They get a PostgreSQL permission error, not a new employee. UPDATE too: re-pointing an existing link is auto-provisioning wearing a different hat |
+| 3 | The lookup runs inside the tenant taken from the request address | A subject linked at another customer resolving to a foreign employee |
+
+Deleting any one of the three still leaves a sign-in that works perfectly for every
+legitimate employee. That is exactly why there are three, and lock 2 is asserted against
+a real database in `packages/core/test/identity-link.test.ts`.
+
+**"No link", "link disabled" and "linked at another customer" all give the same refusal
+with the same code.** Distinguishing them would tell a stranger whether an account exists
+at this employer — REQ-031's subject, one step early.
+
+### 7. Sign-out revokes at the identity provider
+
+Built. Sign-out clears our cookie **and** redirects to the issuer's `end_session_endpoint`.
+
+Clearing our cookie alone leaves the Keycloak session alive, so the next visit bounces
+through Keycloak, finds a live session, and signs the person straight back in without
+asking. On Aisha's own phone that is a mild surprise. On a shared machine in a warehouse
+it is not a sign-out at all — it is a redirect, and the next person to use that browser
+is her.
+
+**What it does NOT send, and the cost:** `id_token_hint`. We do not keep the ID token,
+because the session cookie carries `{ sub, iat, sid }` and nothing else — the property
+REQ-016 and REQ-022 rest on — and there is no server-side session store yet. Without the
+hint, an issuer typically asks the person to confirm the sign-out rather than performing
+it silently. So sign-out still ends the Keycloak session, with one extra tap.
+**→ named follow-up, slice 3d: a server-side session record keyed on `sid`, which
+SEC-09's lifetime enforcement needs anyway.** Not hidden behind a working-looking redirect.
+
+When the issuer publishes no `end_session_endpoint`, `endSessionUrl` returns `null`, the
+local cookie is still cleared, and the caller is told
+`identityProviderSessionSurvives: true` so the page can **say so**. A sign-out that
+silently does half the job is worse than one that admits it.
+
+## The routes, and the boot check doing its job
+
+Three new routes, each carrying an `access` descriptor:
+
+| Route | auth | settingGated | postExit |
+|---|---|---|---|
+| `GET /signin/start` | `public` | false | false |
+| `GET /signin/callback` | `public` | false | false |
+| `POST /signin/out` | `public` | false | false |
+
+`public` is correct and is the only correct answer: these are the routes somebody
+reaches when they are **not yet anybody**. They return no employee data and make no
+authorisation decision.
+
+**`postExit: false` on all three, deliberately, even though an ex-employee inside the
+90-day window must be able to sign in.** The post-exit allowlist governs which routes an
+*already established* post-exit session may reach. A `public` route is reachable by
+everybody by definition, so declaring `postExit: true` would claim a grant it does not
+need and widen a list REQ-022 caps at three. The test asserts the count is still exactly
+what it was.
+
+**Sign-out is `public`, and that is a call rather than an oversight.** It has to work for
+a session we cannot read — expired, sealed with a rotated key, belonging to somebody
+whose link was disabled this morning. Requiring `employee` would mean the people most
+likely to need to sign out are the ones who cannot. The cost is that a cross-site request
+can force a sign-out: a nuisance, not a disclosure. It is `POST`-only so a bare `<img>`
+cannot trigger it, and `SameSite=Lax` withholds the session cookie from a cross-site form
+post, so the forced sign-out does not even reach a session.
+
+### The boot check refused to start, and that was the mechanism working
+
+First run after adding the routes:
+
+```
+Route manifest check FAILED — refusing to start.
+3 route(s) export no `access` descriptor.
+  app\signin\callback\route.ts
+  app\signin\out\route.ts
+  app\signin\start\route.ts
+```
+
+All three *did* export a descriptor. They were **unimportable**, and the walk correctly
+reports "cannot be checked" and "was not declared" as the same thing — both mean we do
+not know who may reach the route.
+
+The cause: `packages/core`'s modules refer to each other with `.js` specifiers that only
+a bundler resolves to `.ts`. `src/check-routes.ts` runs under **plain Node with no build
+step**, on purpose, because a check that needs a toolchain is a check that gets skipped
+in the environment that matters. A static `import { … } from '@hrms/core'` therefore made
+the route file unloadable.
+
+Fixed by importing `@hrms/core` **dynamically inside `runtime.ts`**, on the first request
+that needs it. Node caches the module, so it costs one resolution. Two properties are
+preserved by that shape rather than by care:
+
+1. The boot check still imports every route file with no build step.
+2. **`apps/web` still never imports the database driver.** The pool is built by
+   `packages/core` (`createAppPool`), so the transport layer has no way to open a
+   connection outside the wrapper that forces the extended query protocol — LOCK 2 of the
+   four tenant-identity locks in `docs/99-decision-log.md`. `resolveTenantIdForSigninSlug`
+   is written the same way: it hands back a **uuid, never a `Tx`**, so there is no
+   transaction-with-no-tenant for anybody to hold.
+
+After the fix:
+
+```
+Route manifest OK — 4 route(s) checked:
+  /api/health                  auth=public settingGated=false postExit=false
+  /signin/callback             auth=public settingGated=false postExit=false
+  /signin/out                  auth=public settingGated=false postExit=false
+  /signin/start                auth=public settingGated=false postExit=false
+```
+
+## One refactor, stated because it touched committed code
+
+`sealSession`/`unsealSession` and the new pending cookie both need AES-256-GCM sealing.
+The one thing you must never do with cryptographic code is write it twice — the second
+copy is where the nonce gets reused or the tag gets dropped. So the primitive moved to
+`apps/web/src/sealed.ts` and `session.ts` now calls it, keeping its explicit
+three-field pick on the way in and out. Byte layout unchanged, so the existing
+session tests — which decrypt a cookie *without* going through `unsealSession`, as an
+independent oracle — still pass untouched.
+
+## Failure matrix — the sign-in rows
+
+| What fails | Detected how | Behaviour | What Aisha sees |
+|---|---|---|---|
+| Keycloak discovery or token endpoint down | Fetch throws / non-2xx | Propagates as itself, **not** as a sign-in refusal. Dressing an outage as "your sign-in was rejected" sends her to reset a password that was never wrong | The generic error page; operations gets the real error |
+| ID token fails any check | `IdTokenError` → `SignInError` | 302 to `/signin/failed`, pending cookie cleared | One message. Which check failed is for the log, never the caller |
+| Authenticated, but no `identity_link` | Lookup returns `null` | `NOT_LINKED`, **identical response** to a bad token | The same page as any other refusal |
+| Callback replayed | Pending cookie already cleared | `NO_PENDING_AUTHORIZATION` | Same page. Start again |
+| Sign-in took too long | `now - createdAt > TTL` | `AUTHORIZATION_EXPIRED` | Same page. Start again |
+| Unknown sign-in address | `tenant_id_for_signin_slug` → null | **404, empty body**, no hint that other addresses exist | Nothing |
+| Issuer publishes no `end_session_endpoint` | `endSessionUrl` → null | Local cookie cleared; `?idp=alive` so the page can say the Keycloak session survives | Told plainly, not a fake clean sign-out |
+| Discovery down at sign-out | Caught | Local cookie cleared **anyway** — nobody is trapped signed in | Told the Keycloak session survives |
+
+## What is NOT verified, for want of a real Keycloak
+
+Everything in this list is wiring, and every item is a way for sign-in to fail in
+production while all 237 tests stay green:
+
+1. **Keycloak's discovery document.** Field names, whether `end_session_endpoint` is
+   published on the realm as configured, whether the `issuer` inside it matches the
+   configured one exactly (trailing slash included — `config.ts` compares them and will
+   refuse a mismatch, which is right, and is also a plausible first-day failure).
+2. **Client configuration.** Whether the redirect URI is registered exactly, whether the
+   client is confidential, whether client-secret-basic is the accepted auth method.
+3. **The token endpoint's error bodies.** `httpTransport` turns any non-2xx into a
+   generic `Token exchange failed: <status>`. Keycloak's `error`/`error_description` JSON
+   is not parsed, so a misconfiguration will be diagnosable only from its status code.
+4. **Whether Keycloak signs with RS256 in this realm**, and whether its `kid` values
+   rotate in a way the (currently uncached) JWKS fetch handles sensibly.
+5. **JWKS caching and key rotation.** `jwks()` re-fetches on every callback. That is
+   correct-but-wasteful now and becomes a rate-limit problem later.
+6. **`prompt`, `max_age`, `acr_values`, `login_hint`** — none sent. Fine for a first
+   slice; `max_age` becomes relevant with SEC-09's lifetime work.
+7. **The `Host` header behind a proxy.** `signinSlugFromHost` reads `Host`. Behind a load
+   balancer that rewrites it, or one that forwards `X-Forwarded-Host`, this resolves the
+   wrong tenant or none. **A trusted-proxy decision is required before deployment.**
+8. **TLS, certificates, and the wildcard-versus-per-tenant certificate choice** the Q-19
+   entry recommends.
+
+## What I did NOT build in this slice
+
+Out of scope by instruction, and listed so nobody assumes otherwise: session lifetime
+enforcement (`SEC-09`'s 12-hour/30-minute bounds) · the six record endpoints · the
+current-values and history read models · self-correction · the export · post-exit routing
+and the middleware that applies the route descriptors · REQ-031's timing defence and the
+release grid · any panel rendering · the `/signin/failed` and `/signin/signed-out` pages
+themselves (the routes redirect to them; the pages are slice 3d, with the BA's microcopy).
+
+Also not built, and these are my own judgement calls:
+
+| Not built | Why | When |
+|---|---|---|
+| An audit entry for a refused sign-in | The audit writer requires an `Actor`, and a refused sign-in has none by definition. Forcing one would mean inventing a principal, which is how `actor_id` went wrong in feature 001 | Slice 3d, with the anonymous-actor shape REQ-031 needs anyway |
+| A server-side session record | Needed for `SEC-09` lifetime enforcement *and* for `id_token_hint` at sign-out. Both are one piece of work | Slice 3d |
+| JWKS caching | Correctness first. Caching a key set is where rotation bugs live, and it needs a rotation story | When a measurement or a rate limit asks |
+| Parsing Keycloak's token-endpoint error bodies | Cannot be written honestly without a real Keycloak to see the shapes | With the Keycloak wiring |
+
+## Handoff to hrms-test-automation
+
+**Ready:** slice 3c code and tests. Suite green at **237** (17 ai, 121 core, 99 web),
+up from 145.
+
+**The three assertions I would attack first if I were you:**
+
+1. **The synthetic issuer is mine, and that is a conflict of interest.** If it is wrong in
+   the same direction as the production code, both agree and prove nothing. The strongest
+   independent check available without a container is a **captured real Keycloak ID token
+   and JWKS as a fixture** — verify against them offline.
+2. **The `NOT_LINKED` refusal must be indistinguishable from a bad-token refusal at the
+   HTTP layer**, not only in the code path. I assert the code and the message; I do
+   **not** assert that the two responses are byte-identical or identically timed. That is
+   REQ-031's shape arriving early, and it is not built.
+3. **Re-run my three mutations** — they are reproduced below with exact edits. A test that
+   has never been seen to fail is decoration.
+
+**Assumptions of mine to challenge:**
+
+- That the pending cookie's 600-second `Max-Age` is long enough for a real Keycloak
+  sign-in including a password reset or an MFA prompt. I think it is; measure it.
+- That `SameSite=Lax` survives the return from Keycloak on every browser we support. It
+  should — it is a top-level navigation — but it is exactly the assumption that produces
+  "sign-in works for everybody except Safari".
+- That reading `Host` is safe. It is not, behind an untrusted proxy. See item 7 above.
+
+## Evidence
+
+### Baseline, before this slice
+
+```
+packages/ai   Test Files  1 passed (1)    Tests  17 passed (17)
+packages/core Test Files  8 passed (8)    Tests 108 passed (108)
+apps/web      Test Files  2 passed (2)    Tests  20 passed (20)
+```
+
+### After this slice — `pnpm -r test`
+
+```
+packages/ai   Test Files  1 passed (1)    Tests  17 passed (17)
+packages/core Test Files  9 passed (9)    Tests 121 passed (121)
+apps/web      Test Files  7 passed (7)    Tests  99 passed (99)
+```
+
+**237 passing, up from 145.** Each package's `test` script runs `tsc --noEmit` first, so
+the typecheck is inside those numbers.
+
+### Migration 0006, forward and back on postgres:16
+
+```
+$ psql -d m6 -f 0006_tenant_signin_address.sql
+ALTER TABLE / UPDATE 4 / ALTER TABLE x4 / CREATE FUNCTION / REVOKE / GRANT
+
+         name          |     signin_slug
+-----------------------+----------------------
+ !!!                   | tenant-5d0da7fb          <- name derives to nothing
+ ACME!!!               | acme
+ Acme Ltd              | acme-ltd
+ Northwind Trading Co. | northwind-trading-co
+
+-- collision path, three tenants whose names derive to the same label
+   name    |   signin_slug
+-----------+-----------------
+ Acme Ltd  | acme-ltd
+ Acme  Ltd | acme-ltd-96c6c2
+ acme-ltd  | acme-ltd-fcf50a
+
+-- resolver: exact | case-folded and space-padded | unknown
+ecb1b7a6-381a-4feb-85c7-50393b544796 | ecb1b7a6-...-50393b544796 | NULL
+
+-- constraints
+Northwind        ERROR:  violates check constraint "tenant_signin_slug_is_a_label"
+api              ERROR:  violates check constraint "tenant_signin_slug_not_reserved"
+-lead            ERROR:  violates check constraint "tenant_signin_slug_is_a_label"
+ab               ERROR:  violates check constraint "tenant_signin_slug_is_a_label"
+has_underscore   ERROR:  violates check constraint "tenant_signin_slug_is_a_label"
+
+-- DOWN, then FORWARD again
+columns named signin_slug after the down path: 0
+after re-applying: identical values to the first run
+```
+
+### Verifying `jose` rather than trusting it
+
+Every function used was checked against **the installed 6.2.10**, by running it:
+
+```
+jwtVerify function        createLocalJWKSet function   SignJWT function
+exportJWK function        generateKeyPair function     decodeProtectedHeader function
+license: MIT
+
+verified sub s nonce n1
+alg none refused: ERR_JOSE_ALG_NOT_ALLOWED
+```
+
+---
+
+## Mutation testing — three broken versions that still look correct
+
+I chose the three where a broken implementation is invisible: it signs people in, the
+screens work, and no log line says anything is wrong.
+
+### Mutation 1 — signature verification made to always pass
+
+`apps/web/src/oidc/verify.ts`, replacing the `jwtVerify` call with a decode:
+
+```ts
+    // MUTATION 1 — signature verification made to always pass.
+    payload = JSON.parse(
+      Buffer.from(opts.idToken.split('.')[1] ?? '', 'base64url').toString(),
+    ) as JWTPayload;
+```
+
+**RED — 10 tests fail:**
+
+```
+× the signature is actually checked > refuses a token signed with a key the issuer does not publish
+× the signature is actually checked > refuses a token whose payload was edited after signing
+× the signature is actually checked > refuses a token with an empty signature
+× the algorithm is ours to choose > refuses `alg: none`
+× the algorithm is ours to choose > refuses an algorithm outside the allowlist, even a strong one
+× the algorithm is ours to choose > refuses the algorithm-confusion token — HMAC signed with the public key
+× issuer, audience and expiry > refuses a token from a different issuer
+× issuer, audience and expiry > refuses a token minted for a different application
+× issuer, audience and expiry > refuses an expired token
+× issuer, audience and expiry > refuses a token that expired just outside the clock tolerance
+ Test Files  1 failed | 6 passed (7)
+      Tests 10 failed | 89 passed (99)
+```
+
+**GREEN after restoring:**
+
+```
+ Test Files  7 passed (7)
+      Tests 99 passed (99)
+```
+
+Worth noting what this mutation does NOT break: the happy path. A correctly signed
+token still signs Aisha in, the nonce still matches, the subject is still right. The
+only difference is that **anybody could now mint a token for anybody**.
+
+### Mutation 2 — `state` checking removed
+
+`apps/web/src/oidc/flow.ts`, step 4 deleted:
+
+```ts
+  // MUTATION 2 — the state check removed. The flow still works perfectly.
+  void matchesOneTimeValue;
+```
+
+**RED — 5 tests fail:**
+
+```
+× state > refuses a callback with NO state
+× state > refuses a callback with the WRONG state
+× state > refuses a state that is the right length but the wrong value
+× state > exchanges NOTHING when state fails — the check comes first
+× an authenticated subject with no identity link is DENIED > never consults the lookup when the token itself is bad
+ Test Files  2 failed | 5 passed (7)
+      Tests  5 failed | 94 passed (99)
+```
+
+**GREEN after restoring:**
+
+```
+ Test Files  7 passed (7)
+      Tests 99 passed (99)
+```
+
+The fifth failure is the useful one. It is not a `state` test — it asserts the identity
+lookup is never reached on a bad callback. With `state` gone, an attacker-chosen callback
+now reaches a database query. That is the ordering property, and it broke as a side
+effect, which is what a second, independent assertion is for.
+
+### Mutation 3 — auto-provisioning turned on
+
+Two halves, because the control is two independent locks and each must be shown to hold
+on its own.
+
+**3a — the application branch.** `apps/web/src/oidc/signin.ts`:
+
+```ts
+  const identity =
+    (await deps.lookupIdentity(completed.subject)) ??
+    // MUTATION 3 — auto-provisioning. "They authenticated, so let them in."
+    { personId: `auto-${completed.subject}`, tenantId: 'auto-provisioned' };
+```
+
+**RED — 2 tests fail:**
+
+```
+× an authenticated subject with no identity link is DENIED > refuses, with no session cookie and no link created
+× an authenticated subject with no identity link is DENIED > gives the same refusal for a disabled link as for no link at all
+ Test Files  1 failed | 6 passed (7)
+      Tests  2 failed | 97 passed (99)
+```
+
+**3b — the database grant.** `packages/db/migrations/0005_identity_link.sql`:
+
+```sql
+-- MUTATION 3b — the grant restored: the application can provision links.
+GRANT INSERT, UPDATE, DELETE ON identity_link TO hrms_app;
+```
+
+**RED — 4 tests fail, against a real postgres:16:**
+
+```
+× the application role cannot auto-provision an identity link > refuses INSERT from the application role
+× the application role cannot auto-provision an identity link > refuses UPDATE and DELETE from the application role
+× the application role cannot auto-provision an identity link > leaves the row untouched after all of that
+× resolving a subject inside a tenant > positive control: Aisha resolves at her own employer
+ Test Files  1 failed (1)
+      Tests  4 failed | 9 passed (13)
+```
+
+The fourth is the one I did not predict and am glad of: the earlier tests' INSERT and
+UPDATE **succeeded** once the grant was restored, so by the time the positive control ran,
+Aisha's link had been re-pointed at Meera. The suite noticed that the data had been
+corrupted by a control that stopped holding. A test file where a broken grant only fails
+the tests that name it is a test file that has not understood the blast radius.
+
+**GREEN after restoring both halves — full suite:**
+
+```
+packages/ai   Test Files  1 passed (1)    Tests  17 passed (17)
+packages/core Test Files  9 passed (9)    Tests 121 passed (121)
+apps/web      Test Files  7 passed (7)    Tests  99 passed (99)
+```
+
+Reverts confirmed in the source, not by memory:
+
+```
+$ grep -n "REVOKE INSERT" packages/db/migrations/0005_identity_link.sql
+73:REVOKE INSERT, UPDATE, DELETE ON identity_link FROM hrms_app;
+$ grep -n "identity === null" apps/web/src/oidc/signin.ts
+155:  if (identity === null) {
+$ grep -n "STATE_MISMATCH" apps/web/src/oidc/flow.ts
+121:    throw new SignInError('STATE_MISMATCH', 'This sign-in did not start in this browser.');
+$ grep -n "jwtVerify(opts.idToken" apps/web/src/oidc/verify.ts
+93:    ({ payload } = await jwtVerify(opts.idToken, keys, {
+```
+
+**I have not signed this off.** That is the reviewer's, and the Keycloak wiring is
+unverified by design.
