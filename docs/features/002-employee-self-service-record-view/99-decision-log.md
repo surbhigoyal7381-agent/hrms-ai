@@ -188,3 +188,21 @@ REQ-031 asks for responses byte-identical *"including any nonce or token positio
 - The BA should reflect this in RULE-001 rather than leaving the requirement and the code disagreeing. Raised as a note to hrms-business-analyst, non-blocking.
 - The reviewer sees a deliberate, approved divergence, not a defect.
 - `settings.ts` already propagates rather than swallowing the error; no code change needed.
+
+### 2026-08-28 — Q-19 resolved: readable tenant sign-in addresses
+**Decided by:** the human, 2026-08-28, after the trade was put to them twice.
+**Decision:** the tenant sign-in address is **readable** — `northwind.<product>.app`, not an opaque random slug. Security is enforced inside the application: the tenant setting, the permissions model, RLS, and the audit trail. None of those change.
+
+**What was traded away, recorded so nobody re-argues it from scratch.** A readable address is enumerable. Not "the customer list can be downloaded" — the accurate statement is **"any company can be confirmed or denied, in bulk, by anyone."** Two routes, neither needing anything from us:
+1. Guessing from a candidate list — an industry, a competitor's clients, a public company index — automated.
+2. **Certificate Transparency.** Every publicly-trusted TLS certificate is written to public searchable logs by design. A per-tenant certificate publishes the tenant's name there within minutes.
+
+**The human's reasoning, recorded as given:** there is no shared tenant picker and no common login page; each customer is handed its own URL directly. That is true and it removes the *convenience* route, but not the *guessing* or *certificate-log* routes, because neither depends on us publishing anything. The decision was reaffirmed with that understood.
+
+**Why this is a legitimate call, not a lapse:** whether the customer list is commercially sensitive is a business judgement, not a security one. No employee's personal data is exposed by an enumerable address. Widely-used business software makes the same choice.
+
+**Two mitigations that preserve readable addresses, offered and NOT taken now:**
+- **A single wildcard certificate** rather than one per tenant. Closes the Certificate Transparency route entirely. A deployment setting, not code. **Recommended when this ships to a real domain.**
+- **A uniform pre-authentication response**, so an unknown address is indistinguishable from a real one. Closes the guessing route. **This one has a design consequence:** REQ-031's closed-window page renders *that tenant's* data-protection contact to an unauthenticated caller, which is only safe if the address is already known to be real. Adopting it later means REQ-031 needs re-deriving.
+
+**Consequence for the build:** migration 0006's opaque slug is not what ships. The address carries a readable tenant identifier. `resolveRequestContext` still takes the tenant from the request host, so a subject from another customer still resolves to nothing — that property is unaffected.
