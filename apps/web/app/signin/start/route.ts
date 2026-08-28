@@ -1,4 +1,5 @@
 import type { RouteAccess } from '@hrms/core';
+import { guarded } from '../../../src/guard.ts';
 import { beginSignIn } from '../../../src/oidc/signin.ts';
 import {
   UnknownTenantError,
@@ -25,7 +26,7 @@ export const access: RouteAccess = {
   postExit: false,
 };
 
-export async function GET(request: Request): Promise<Response> {
+export const GET = guarded('/signin/start', async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
   const returnTo = url.searchParams.get('returnTo') ?? '/record';
 
@@ -56,4 +57,4 @@ export async function GET(request: Request): Promise<Response> {
       'cache-control': 'no-store',
     },
   });
-}
+});

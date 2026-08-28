@@ -1,4 +1,5 @@
 import type { RouteAccess } from '@hrms/core';
+import { guarded } from '../../../src/guard.ts';
 import { finishSignIn, SignInError } from '../../../src/oidc/signin.ts';
 import { PENDING_COOKIE_NAME, clearedPendingCookie } from '../../../src/oidc/pending-cookie.ts';
 import {
@@ -44,7 +45,7 @@ function refused(status: number): Response {
   });
 }
 
-export async function GET(request: Request): Promise<Response> {
+export const GET = guarded('/signin/callback', async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
 
   let deps;
@@ -86,4 +87,4 @@ export async function GET(request: Request): Promise<Response> {
   headers.append('set-cookie', serialiseCookie(done.sessionCookie));
   headers.append('set-cookie', serialiseCookie(done.clearPendingCookie));
   return new Response(null, { status: 302, headers });
-}
+});

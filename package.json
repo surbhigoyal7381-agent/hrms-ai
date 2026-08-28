@@ -4,7 +4,7 @@
   "packageManager": "pnpm@9.0.0",
   "engines": { "node": ">=22" },
   "scripts": {
-    "test": "pnpm -r test",
+    "//test": "Run the suite with `pnpm -r test`, not `pnpm test`. A root test script that shells out to `pnpm -r test` makes the ENTIRE suite run twice, concurrently, because -r includes the root project; the two copies then fight over the same integration-test database names and fail at random.",
     "db:migrate": "node packages/db/src/migrate.mjs",
     "db:reset": "node packages/db/src/migrate.mjs --reset"
   }

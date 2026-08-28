@@ -298,3 +298,90 @@ likely to bite on day one are **the discovery document's `issuer` matching ours 
 trailing slash included** (we refuse a mismatch, correctly, and it is a plausible first
 failure) and **reading the `Host` header behind a proxy** — a trusted-proxy decision is
 required before this is deployed, or a rewritten `Host` resolves the wrong tenant or none.
+
+### 2026-08-28 — The route descriptors were never enforced. Closed in slice 3d.
+**Found by:** the coordinator, reviewing slice 3c. **Fixed by:** hrms-fullstack-engineer.
+
+**The gap.** `RouteAccess` was declared per route and checked AT BOOT for existence. Nothing
+applied it per request. A route could declare `auth: 'employee', tenantSettingGated: true`
+and serve the entire internet, and all 237 tests would have stayed green — every test was
+about the descriptor's *presence*, none about its *effect*.
+
+This is the fourth instance of the same shape in this product: feature 001's
+`hasLegalHold()`, feature 001's `TENANT_SCOPED` list, migration 0001's `SEC-04` comment, and
+now this. **A control that is believed to be in place and is not.** Recorded here rather than
+only in the design note, because the pattern is the finding.
+
+**Closed by** `decideRouteAccess` in `packages/core/src/access-control.ts` (pure, framework-
+free, enumerable) plus `guarded()` in `apps/web/src/guard.ts`, which every handler is wrapped
+in and which reads the descriptor **from the manifest**, never from an argument the route
+supplies. A test imports every route module and asserts the exported handler IS the wrapped
+one, so a route cannot quietly stop being gated.
+
+### 2026-08-28 — An unreadable store outranks "who are you" — extending the RULE-001 divergence
+**By:** hrms-fullstack-engineer. **Non-blocking, but it extends an approved ruling and the
+reviewer should confirm I read it correctly.**
+
+The human ruled on 2026-08-28 that an unreadable *setting store* must give 503, not 403,
+because a 403 tells Aisha her employer switched something off when the truth is that we are
+broken.
+
+**The same argument applies one step earlier, and I have applied it.** The per-request
+resolution is ONE query answering both *who is this* and *what does the setting say*. When
+it fails, both answers are missing — so a 401 "you are not signed in" is the same lie in a
+different costume, and a worse one, because Aisha would go and reset a password that was
+never wrong. So an unreadable resolution returns **503 before the authentication check**.
+
+**Scoped, deliberately:** only for routes that actually needed the lookup. A public, ungated
+route — the health check, the sign-in redirect — asks the database nothing and keeps working
+during an outage. A liveness probe that fails when the database is down reports the wrong
+outage.
+
+**If the reviewer thinks this over-reads the ruling**, the change is one condition, and I
+would rather be argued out of it than have it pass unnoticed.
+
+### 2026-08-28 — `hr_admin` routes deny everybody, because roles are not resolved yet
+**By:** hrms-fullstack-engineer, slice 3d. **A gap, stated rather than papered over.**
+
+Nothing in this product resolves roles from the database. `AccessPrincipal.roles` is an empty
+set on every real request, so a route declaring `auth: 'hr_admin'` refuses everyone.
+
+**This is the intended behaviour until role resolution ships**, and it fails in the safe
+direction: the first admin route to be built will be refused for everybody, loudly, on its
+first test. The alternative — treating an unresolvable role as satisfied — is how an
+administrative endpoint ships open.
+
+There is a passing test asserting it, with a positive control proving the same shape IS
+allowed when the role is present, so the empty set cannot be mistaken for a function that
+denies everything.
+
+### 2026-08-28 — `/api/me/record` refuses every ex-employee, which is narrower than REQ-022
+**By:** hrms-fullstack-engineer, slice 3d. **A knowing divergence from the requirement, in
+the safe direction. Owner of the fix: whoever builds post-exit routing.**
+
+REQ-022 grants an ex-employee 90 days of access to a minimal view of this route. **The window
+is not built** — post-exit routing was out of this slice's scope — but the `postExit`
+descriptor had to be enforced or it would have been half-real.
+
+So `/api/me/record` declares `postExit: false` and **every exited session is refused,
+including on day 1.** Refusing somebody the requirement would admit is a bug to fix;
+admitting somebody it would refuse is a breach. This is the safe half of that pair.
+
+**Request to the Test agent, recorded so it is not lost:** write this as a FAILING acceptance
+test against REQ-022, not a passing one against my implementation. A gap encoded as a green
+test is a gap nobody fixes.
+
+### 2026-08-28 — A latent cursor bug in the history read model, found by seeding an overflow
+**By:** hrms-fullstack-engineer, slice 3d. **Recorded because of how it was caught, not
+because of what it was.**
+
+The history cursor was read off the raw PostgreSQL row (`rows[n].decidedAt`) instead of the
+mapped entry. PostgreSQL returns snake_case, so it was always `undefined`, and the `?? null`
+swallowed it. **The cursor was silently always null** — which reads as "no more pages" and
+would have truncated every long change history at 25 entries, with no error anywhere and no
+symptom until an employee with a long career said "my history stops in March".
+
+It was caught because the test **seeds 30 rows and asserts a real second page**, rather than
+asserting the page-size constant. A test written against the constant would have agreed with
+the bug. This is the same lesson as the vacuous-assertion sweep: assert the business fact,
+never the derivation the production code uses.

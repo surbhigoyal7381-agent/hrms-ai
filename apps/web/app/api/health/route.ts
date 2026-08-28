@@ -1,4 +1,5 @@
 import type { RouteAccess } from '@hrms/core';
+import { guarded } from '../../../src/guard.ts';
 
 /**
  * Liveness only. It says the process is up; it says nothing about the database,
@@ -15,6 +16,15 @@ export const access: RouteAccess = {
   postExit: false,
 };
 
-export function GET() {
-  return Response.json({ status: 'ok' });
-}
+/**
+ * Wrapped like every other route, even though it is public and gates nothing.
+ *
+ * Uniformity IS the control. The moment one route is allowed to skip the
+ * wrapper "because it obviously does not need it", the next one skips it
+ * because it looks like that one, and the gate becomes a convention. The guard
+ * costs this route nothing: a public, ungated route is decided without touching
+ * the database, so liveness still answers during an outage.
+ */
+export const GET = guarded('/api/health', () =>
+  Response.json({ status: 'ok' }, { headers: { 'cache-control': 'no-store' } }),
+);

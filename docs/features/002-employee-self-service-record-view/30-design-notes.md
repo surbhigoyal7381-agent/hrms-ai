@@ -1823,3 +1823,450 @@ $ grep -n "jwtVerify(opts.idToken" apps/web/src/oidc/verify.ts
 
 **I have not signed this off.** That is the reviewer's, and the Keycloak wiring is
 unverified by design.
+
+---
+
+# Slice 3d — the descriptors made real, and the record view (added 2026-08-28)
+
+**Tier: L, continued.** Authorisation and personal data. Never eligible for tier S.
+
+Two parts, in this order, because enforcement without the screen is safe and the screen
+without enforcement is not.
+
+## Part 1 — the gap, stated plainly
+
+Before this slice, `RouteAccess` was **a comment with a type annotation.**
+
+The boot check proved a descriptor *existed*. Nothing applied it. A route could declare
+`auth: 'employee', tenantSettingGated: true` and serve the entire internet, and all 237
+tests would have stayed green — because every test was about the descriptor's *presence*,
+and none was about its *effect*.
+
+That is the shape of defect this project keeps producing: feature 001's `hasLegalHold()`,
+feature 001's `TENANT_SCOPED` list, feature 002's `SEC-04` comment on migration 0001. A
+control that is believed to be in place and is not. It is closed now.
+
+### Where the decision lives, and why it is a pure function
+
+`packages/core/src/access-control.ts` — `decideRouteAccess(request): AccessDecision`. No
+request object, no database, no framework.
+
+That is not tidiness. It is what makes the test able to enumerate every route the
+filesystem walk finds, cross it with eight personas and four setting states, and assert the
+outcome — hundreds of combinations, none of them mocked, none of them behind an HTTP
+server. **Authorisation logic that can only be exercised through a running server is
+authorisation logic that gets tested on three happy paths.**
+
+### The order, and why each step is where it is
+
+| # | Question | Refusal |
+|---|---|---|
+| 1 | Do we know who may reach this route at all? | `403 ROUTE_NOT_DECLARED` **+ alert** |
+| 2 | Is our own store answering? | `503 TEMPORARILY_UNAVAILABLE` **+ alert** |
+| 3 | Do we know who is asking? | `401 AUTHENTICATION_REQUIRED` |
+| 4 | Do they hold the role the route requires? | `403 FORBIDDEN` |
+| 5 | Have they left? | `403 POST_EXIT_SESSION` |
+| 6 | Has the organisation turned this on? | `403 RECORD_VIEW_DISABLED` |
+
+Four of those orderings are load-bearing:
+
+**Step 1 fails closed.** An undeclared route is not "public by default" and not "denied by
+default" — it is a route nobody has decided about. It denies *and alerts*, because reaching
+that line means the boot check was somehow walked around, which is an incident rather than
+a 403 to shrug at.
+
+**Step 2 outranks step 3, and this is the one I had to think hardest about.** The
+per-request resolution is ONE query answering both *who is this* and *what does the setting
+say*. When it fails, both answers are missing — so replying `401 you are not signed in`
+would be the same class of lie the human ruled against on 2026-08-28, and a worse one:
+Aisha would go and reset a password that was never wrong. It is scoped to routes that
+actually needed the lookup, so a public ungated route — health, the sign-in redirect —
+keeps working during a database outage. **A liveness probe that fails when the database is
+down reports the wrong outage.**
+
+**Step 5 before step 6.** REQ-022 says the post-exit window is *narrower than the switch,
+never wider*. Checking the setting first would let a switched-on tenant's ex-employee
+through on a route the requirement excludes.
+
+**Step 6 treats `off` and `unset` as ONE refusal** — same status, same code, and nothing
+carried out of `setting.source`. An employee who could tell "my employer deliberately
+switched this off" from "nobody has ever configured it" would be reading an administrative
+fact about their employer out of an error response. `source` is for the log; the test
+asserts it never reaches the wire, by searching the serialised decision.
+
+### The RULE-001 divergence, in code
+
+`SettingState` is a three-state union, not a boolean with a flag:
+
+```ts
+type SettingState =
+  | { kind: 'resolved'; enabled: boolean; source: SettingSource }
+  | { kind: 'unreadable' };
+```
+
+Collapsing "the organisation turned it off" and "we could not read our own store" into one
+boolean is *how the lie gets built*. Keeping them apart in the type means the 403 branch
+cannot be reached by a store failure without somebody deleting a case.
+
+### `hr_admin` denies everybody today, on purpose
+
+Nothing in this product resolves roles from the database yet. `AccessPrincipal.roles` is an
+empty set on every real request, so an `hr_admin` route refuses everyone.
+
+That is a real gap and it fails in the safe direction. **The first admin route to ship will
+be refused for everybody, loudly, on its first test** — which is a far better failure than
+the alternative. It is written down as a passing test with a positive control, so nobody
+reads the empty set as an oversight.
+
+### How a route is stopped from skipping the gate
+
+A perfect decision function and correct descriptors still lose to a route that simply does
+not call the guard. Three things stop that:
+
+1. **`guarded(pathname, handler)` wraps every handler.** No route gates itself, so there is
+   no route that forgot to. The guard looks the descriptor up **from the manifest** — never
+   from an argument the route passes in — so a route cannot describe itself one way on the
+   way in and another way in its descriptor.
+2. **The wrapped function carries `declaredPath` at runtime.** The test asserts it equals
+   the URL the file actually serves, so `guarded('/api/me/recrod', …)` fails in CI instead
+   of looking up no descriptor and denying every request in production.
+3. **The test imports every route module and checks the exported `GET`/`POST` IS the
+   wrapped function** — `handler.name === 'guardedRoute'`. Grepping for `guarded(` proves
+   the text is present; this proves the thing requests actually reach.
+
+Even `/api/health` is wrapped, though it gates nothing. **Uniformity is the control.** The
+moment one route may skip the wrapper "because it obviously does not need it", the next one
+skips it because it looks like that one. It costs health nothing: a public ungated route is
+decided without touching the database.
+
+## How the manifest enumeration test works
+
+`apps/web/test/access-enforcement.test.ts`. **There is no array of route paths in that
+file.** Two different things are proved, and conflating them is how this goes wrong:
+
+**COVERAGE — no route on disk escapes the gate.** The route list comes from
+`discoverRoutes(APP_DIR)`, the same walk the boot check and the guard use. A route added in
+feature 004 appears in every property below on the day the file lands, whether or not
+anybody remembered this test exists.
+
+**BEHAVIOUR — the gate decides correctly for every shape a descriptor can take.** The app
+does not contain one route of every shape, so the twelve combinations the type permits
+(3 auth × 2 gated × 2 postExit) are constructed and decided. A property asserted only over
+the shapes that happen to exist today silently stops being asserted the day one is deleted.
+
+The properties are stated as **the requirement**, never as a re-derivation of the
+production logic:
+
+| Property | Requirement |
+|---|---|
+| Anonymous is refused 401 on every non-public route | SEC-01 |
+| `off` and `unset` decisions are **deep-equal**, and both refuse | REQ-001 |
+| An unreadable store gives 503, never 403 | RULE-001 divergence, 2026-08-28 |
+| An **ungated public** route is byte-identical across all four setting states | RULE-002 — the switch never governs a statutory right |
+| The set of paths reachable after exit ⊆ `POST_EXIT_ALLOWED_PATHS` | REQ-022 |
+| A non-`hr_admin` persona never reaches an `hr_admin` route | Part 5 |
+| A missing descriptor denies for every persona × state | fail closed |
+
+### Three guards against the test passing vacuously
+
+This is where the same trap has caught this project three times, so it is guarded three
+ways:
+
+1. **An independent oracle on the enumeration.** `fs.access` confirms four specific route
+   files are on disk *before* anything is asserted over the walk. "For every route…" over
+   an empty list is true and proves nothing — which is exactly how feature 001 shipped a
+   green suite over a list that had lost its most important entry.
+2. **A size floor.** routes × personas × states ≥ 100.
+3. **A composition assertion, and this is the important one.** The suite fails if there is
+   no setting-gated route on disk, no authenticated route, or no public route. Until
+   `/api/me/record` landed in part 2, **every REQ-001 property in that file was vacuously
+   true**, and this assertion is what will say so out loud the day somebody deletes the last
+   gated route.
+
+## Part 2 — the record view
+
+`packages/core/src/record-view.ts`, and `GET /api/me/record`, the first route in this
+product that is setting-gated and serves personal data.
+
+### Current values — REQ-002
+
+Twenty fields: name, preferred name, pronouns, date of birth, personal email and phone,
+emergency contact, photo, employee number, work email, hire date, exit date, status, and
+the effective-dated attributes — job title, team, manager, secondary manager, employment
+type, work location — resolved **as at a business date the caller passes in**.
+
+The module never calls `new Date()`. "Today" for Aisha is a question about her work
+calendar, so it is resolved once by the caller and passed down, which means the current
+values and the "is this change still in the future" flag are computed from the same source
+and **cannot disagree**.
+
+**The national identifier is not there, and its absence is the design.** Not masked, not
+blank, not an empty labelled row — the PM's ruling of 2026-08-26. `national_id_ref` does
+not appear in any `SELECT` in the file. Not selected and then dropped: **never fetched**. A
+column that is never loaded cannot be leaked by a logger, a serialiser, an error page, or a
+future refactor that spreads the row into a response.
+
+Two tests, because one is not enough:
+
+- **Behavioural, with a seeded sentinel.** The fixture writes
+  `THIS-MUST-NEVER-REACH-A-SCREEN` into the column, confirms through the owner role that it
+  is really there, then asserts the string is absent from the serialised read model. Without
+  the seeded value and the owner-role confirmation, this would be a test that a NULL column
+  returns nothing — vacuous by schema, exactly the `PRIV-07` trap the design note names.
+- **Structural.** The source of `record-view.ts` is read and asserted not to contain
+  `national_id_ref` outside comments, which catches somebody adding a `SELECT p.*` for
+  convenience later. The behavioural test alone would still pass if the column were fetched
+  and then dropped in the mapping — and a fetched column can reach a log in a hurry.
+
+**More than one version in effect on one date throws `TemporalAmbiguityError`**, which the
+route turns into a 503 and an alert. REQ-002 is explicit: never show Aisha one of two
+possible truths.
+
+### History — REQ-003, REQ-004
+
+From `transparency_ledger`. What changed, when it was recorded, **who decided, and why in
+their own words**.
+
+**`decided_by_name` is read directly and never joined to a live employment row.** That is
+the entire reason the column was denormalised in feature 001. A join would return today's
+name, and nothing at all once the decider is erased — and REQ-003 says the entry must still
+name somebody: "Former employee" if the name was pseudonymised, the original name if not,
+and **never blank and never "Unknown"**. There is a test that pseudonymises the name and
+asserts the entry still reads correctly, with the reason intact.
+
+**Future-dated changes are shown, at the top, flagged.** No hiding, no delay window, no
+per-change suppression — the human's ruling of 2026-08-26, reaffirming feature 001's Q-04.
+The `future` flag is computed against the business date passed in, so the same row read on
+2026-09-02 is simply history, and that is testable without waiting five days.
+
+**A corrected entry supersedes the original in the read path** (Q-13). The read renders
+rows no live successor points at. The original still exists and the test confirms it
+through the owner role — append-only is not compromised by a display rule.
+
+**Ordering is total:** future first, then `decided_at DESC, id DESC`. The id tiebreak is
+not decoration — two decisions recorded in the same millisecond would otherwise page
+non-deterministically and an entry could appear twice or never, and nobody would notice for
+months.
+
+### A bug the tests found, which is why the fixture seeds an overflow
+
+The cursor was read off the **raw database row** (`rows[n].decidedAt`) rather than the
+mapped entry. PostgreSQL returns snake_case, so that was always `undefined`, and the
+`?? null` swallowed it. **The cursor was silently always `null`** — which reads as "no more
+pages" and would have truncated every long history at 25 entries, with no error anywhere.
+
+It was caught because the test seeds **30 rows and asserts a second page**, rather than
+asserting the page-size constant. A test written against the constant would have agreed
+with the bug.
+
+## PERF-01 — what actually goes to the device, measured
+
+**Stated plainly first: I built the API, not the screen.** There is no page, no React
+component, no rendering in this slice. So I cannot claim "interactive in under 2.0s" — that
+number is a property of a screen that does not exist yet. What I can give is the payload
+that screen will have to render, measured rather than estimated.
+
+Measured against a real fixture — 40 ledger entries seeded, full personal details, realistic
+reason text:
+
+```
+history entries returned : 25
+JSON bytes               : 9076
+gzipped bytes            : 1297
+current-value fields     : 20
+```
+
+**1.3 KB gzipped for a full page.** Against the design note's 30 KB HTML budget, the data
+is not the constraint — the rendering will be.
+
+How that stays true as Aisha's history grows:
+
+- **One page, always.** `LIMIT 26` — 25 entries plus one row to learn whether more exist.
+  Never the whole history, whether she has three entries or three hundred.
+- **No `COUNT(*)`, anywhere.** The count would be a second scan of an unbounded set for a
+  number nobody asked for. "Are there more pages" is answered by the 26th row.
+- **Three statements in one transaction** — current values, one history page, one audit
+  insert — all index-driven.
+- **The audit write is in the same transaction as the read** (REQ-014), so a failed audit
+  write rolls the read back and no employee data is returned. A read Aisha cannot see in her
+  own access log is the promise broken.
+
+**Not measured, and therefore not claimed:** server p95 under load, time-to-interactive,
+anything about a browser. Those need the screen and a load generator, and they are the Test
+Automation agent's.
+
+## What I did NOT build
+
+Out by instruction: the access-log page, the confidential panel, self-correction and the
+`SELF_CORRECTABLE` function, the export, post-exit routing, REQ-031's timing defence,
+session lifetime enforcement and the server-side session record.
+
+Out by my own judgement, and these are the ones to argue with:
+
+| Not built | Why | Consequence today |
+|---|---|---|
+| **The 90-day post-exit window** | Post-exit routing is out of scope, but the descriptor had to be enforced or it would be half-real | `/api/me/record` declares `postExit: false`, so **every** exited session is refused, including day 1. That is NARROWER than REQ-022 grants. Refusing somebody the requirement would admit is a bug; admitting somebody it would refuse is a breach — this is the safe half |
+| **Role resolution from the database** | A separate piece of work with its own schema question | `hr_admin` routes deny everybody. No such route exists yet |
+| **Timezone resolution against the work calendar** | There is no work-calendar table in this product | `asOf` is UTC today. RULE-009's named-zone formatting is not met and is not claimed |
+| **Locale formatting of dates** (`I18N-02`) | The API returns ISO; formatting belongs to the screen, on the server, per the design note | ISO strings in the JSON are correct **only** while no user sees them directly. The renderer must format, and `I18N-02`'s scan is not satisfied by this slice |
+| **The `own_record_viewed` analytics event** (`OBS-03`) | The audit entry is written; the first-party event is not | REQ-002's event criterion is unmet. Named, not silently skipped |
+| **A `RECORD_VIEW_DISABLED` end-to-end HTTP test** | Needs a running Next.js server and a seeded tenant | The gate is proven at the decision layer over every route × persona × state, and the guard wiring is proven structurally. An HTTP-level test is the Test agent's, and I would want one |
+
+## Evidence — slice 3d
+
+### Before and after
+
+```
+                 before (3c)               after (3d)
+packages/ai       17 passed (17)            17 passed (17)
+packages/core    121 passed (121)          137 passed (137)
+apps/web          99 passed (99)           124 passed (124)
+                 ---                       ---
+                 237                       278
+```
+
+Each package runs `tsc --noEmit` before vitest, so the typecheck is inside those numbers.
+
+### The boot check, with the first gated route on disk
+
+```
+Route manifest OK — 5 route(s) checked:
+  /api/health                  auth=public   settingGated=false postExit=false
+  /api/me/record               auth=employee settingGated=true  postExit=false
+  /signin/callback             auth=public   settingGated=false postExit=false
+  /signin/out                  auth=public   settingGated=false postExit=false
+  /signin/start                auth=public   settingGated=false postExit=false
+```
+
+### Payload, measured against a real fixture
+
+```
+history entries returned : 25
+JSON bytes               : 9076
+gzipped bytes            : 1297
+current-value fields     : 20
+```
+
+---
+
+## Mutation testing
+
+Two mutations, both chosen because the broken version still looks completely correct: every
+screen works, every sign-in succeeds, no log line says anything is wrong.
+
+### Mutation 1 — the setting gate always passes
+
+`packages/core/src/access-control.ts`:
+
+```ts
+    // MUTATION 1 — the setting gate always passes.
+    if (false as boolean) {
+```
+
+**RED — 2 tests:**
+
+```
+× every route on disk, every persona, every setting state
+    > refuses a setting-gated route IDENTICALLY when off and when unset
+× every descriptor shape the type permits
+    > applies the gate to every gated shape and to no ungated one
+ Test Files  1 failed | 7 passed (8)
+      Tests  2 failed | 122 passed (124)
+```
+
+The first of those is the **manifest-enumerated** one, failing on the real `/api/me/record`
+descriptor read off the disk walk. Before part 2 landed there was no gated route and that
+test was vacuously true — which is precisely why the non-vacuity assertion was added.
+
+**GREEN after restoring: 124 passed (124).**
+
+### Mutation 2 — a route with no descriptor reaches its handler
+
+Two halves, because the control is two independent things and each must be shown to hold
+on its own.
+
+**2a — the decision function treats a missing descriptor as public.** This is what "public
+by default" looks like written down:
+
+```ts
+  if (access === undefined) {
+    return { allowed: true, access: { auth: 'public', tenantSettingGated: false, postExit: false } };
+  }
+```
+
+**RED — 1 test:**
+
+```
+× every descriptor shape the type permits
+    > denies EVERY shape when the descriptor is missing at request time
+      Tests  1 failed | 123 passed (124)
+```
+
+**2b — the route skips the guard entirely**, which is the realistic version: the descriptor
+is still declared, still correct, still checked at boot, and nothing applies it.
+
+```ts
+export const GET = ((handler) => handler)(async (request, context) => {
+```
+
+**RED — 2 tests, with 2a still in place:**
+
+```
+× every descriptor shape the type permits
+    > denies EVERY shape when the descriptor is missing at request time
+× no route can skip the gate
+    > every HTTP handler on disk is a guarded handler, declaring its own path
+ Test Files  1 failed | 7 passed (8)
+      Tests  2 failed | 122 passed (124)
+```
+
+That second failure is the one worth having. A grep for `guarded(` would still have found
+the text in the file; the test fails because the **exported handler** — the function a
+request actually reaches — is no longer the wrapped one.
+
+**GREEN after restoring both halves — full suite:**
+
+```
+packages/ai   Test Files  1 passed (1)    Tests  17 passed (17)
+packages/core Test Files 10 passed (10)   Tests 137 passed (137)
+apps/web      Test Files  8 passed (8)    Tests 124 passed (124)
+```
+
+Reverts confirmed in the source, not from memory:
+
+```
+$ grep -n "ROUTE_NOT_DECLARED', 'route_reached" packages/core/src/access-control.ts
+126:    return deny(403, 'ROUTE_NOT_DECLARED', 'route_reached_with_no_access_descriptor');
+$ grep -n "if (!setting.enabled)" packages/core/src/access-control.ts
+191:    if (!setting.enabled) {
+$ grep -n "guarded('/api/me/record'" apps/web/app/api/me/record/route.ts
+33:export const GET = guarded('/api/me/record', async (request, context) => {
+```
+
+**I have not signed this off.** That is the reviewer's.
+
+## Handoff to hrms-test-automation
+
+**The three places I would attack first if I were you:**
+
+1. **There is no HTTP-level test of the gate.** Everything is proven at the decision layer
+   and structurally at the wiring layer. A real request through a running Next.js server,
+   against a seeded tenant with the setting off, asserting `403 RECORD_VIEW_DISABLED` and an
+   empty body, is the test I could not write in this slice and most want to exist.
+2. **`decideRouteAccess` is mine and its test is mine.** If both are wrong in the same
+   direction they agree and prove nothing. The independent oracle available to you is the
+   requirements table in RULE-002 — read it as a spreadsheet and generate the expectations
+   from it, not from my code.
+3. **The `postExit: false` on `/api/me/record` is deliberately narrower than REQ-022.** It
+   should be a *failing* acceptance test against the requirement, not a passing one against
+   my implementation. Please write it that way, so the gap is visible rather than encoded.
+
+**Assumptions of mine to challenge:**
+
+- That `asOf` as UTC-today is acceptable until the work calendar exists. It is wrong for
+  Aisha at 00:03 IST, who will see yesterday's date.
+- That 25 is the right page size for history. It is copied from the access log; nobody has
+  measured what Aisha actually scrolls.
+- That the audit write belongs inside the read transaction for this route. REQ-014 says so
+  and I agree — but it means a slow audit insert makes the record view slow, and that is a
+  trade nobody has measured under load.

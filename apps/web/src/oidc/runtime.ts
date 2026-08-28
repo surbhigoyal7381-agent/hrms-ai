@@ -46,12 +46,12 @@ let transport: OidcTransport | null = null;
  */
 type Core = typeof import('@hrms/core');
 let core: Promise<Core> | null = null;
-function getCore(): Promise<Core> {
+export function getCore(): Promise<Core> {
   if (!core) core = import('@hrms/core');
   return core;
 }
 
-async function getPool(): Promise<AppPool> {
+export async function getPool(): Promise<AppPool> {
   if (!pool) {
     const connectionString = process.env.APP_DATABASE_URL;
     if (!connectionString) {
@@ -176,4 +176,48 @@ export function serialiseCookie(cookie: SerialisableCookie): string {
     if (o.maxAge === 0) parts.push('Expires=Thu, 01 Jan 1970 00:00:00 GMT');
   }
   return parts.join('; ');
+}
+
+/**
+ * Which tenant, and who — the resolution every guarded request performs.
+ *
+ * ONE round trip does four jobs: who is this, which tenant, is the record view
+ * on, and where in the exit lifecycle. That is why nothing authorisation-related
+ * is in the session cookie: it costs one indexed lookup we make anyway, and a
+ * value that is not in the cookie cannot go stale (REQ-016) and cannot be forged.
+ *
+ * Throws `UnknownTenantError` for an address that names no customer — which the
+ * guard turns into a flat 404. Any OTHER throw is our store failing, and the
+ * guard turns that into 503, never 403 and never 401.
+ */
+export interface ResolvedRequest {
+  tenantId: string;
+  /** `null` when there is no session, or the subject has no live identity link. */
+  context: import('@hrms/core').RequestContext | null;
+}
+
+export async function requestResolutionForHost(
+  host: string | null | undefined,
+  subject: string | null,
+): Promise<ResolvedRequest> {
+  const slug = signinSlugFromHost(host);
+  if (slug === null) {
+    throw new UnknownTenantError('This address does not identify an organisation.');
+  }
+  const { resolveTenantIdForSigninSlug, resolveRequestContext, withTenantForResolution } =
+    await getCore();
+
+  const tenantId = await resolveTenantIdForSigninSlug(await getPool(), slug);
+  if (tenantId === null) {
+    throw new UnknownTenantError('This address does not identify an organisation.');
+  }
+
+  // No session: we still resolved the tenant, which is what the setting is read
+  // against. The context stays null and the guard refuses anything non-public.
+  if (subject === null) return { tenantId, context: null };
+
+  const context = await withTenantForResolution(await getPool(), tenantId, (tx) =>
+    resolveRequestContext(tx, subject),
+  );
+  return { tenantId, context };
 }

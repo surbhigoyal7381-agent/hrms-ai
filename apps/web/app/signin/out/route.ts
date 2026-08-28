@@ -1,4 +1,5 @@
 import type { RouteAccess } from '@hrms/core';
+import { guarded } from '../../../src/guard.ts';
 import { signOut } from '../../../src/oidc/signin.ts';
 import { SESSION_COOKIE_NAME } from '../../../src/session.ts';
 import {
@@ -30,7 +31,7 @@ export const access: RouteAccess = {
   postExit: false,
 };
 
-export async function POST(request: Request): Promise<Response> {
+export const POST = guarded('/signin/out', async (request: Request): Promise<Response> => {
   let deps;
   try {
     deps = await signInDepsForHost(request.headers.get('host'));
@@ -65,4 +66,4 @@ export async function POST(request: Request): Promise<Response> {
   // wording; the wording itself is slice 3d's, with the BA.
   headers.set('location', '/signin/signed-out?idp=alive');
   return new Response(null, { status: 302, headers });
-}
+});

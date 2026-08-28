@@ -55,10 +55,29 @@ export {
 } from './access-log.js';
 
 export {
+  readCurrentValues,
+  readChangeHistory,
+  HISTORY_PAGE_SIZE,
+  TemporalAmbiguityError,
+  type CurrentValues,
+  type HistoryEntry,
+  type HistoryPage,
+} from './record-view.js';
+
+export {
   resolveRequestContext,
   type RequestContext,
   type Lifecycle,
 } from './request-context.js';
+
+export {
+  decideRouteAccess,
+  type AccessRequest,
+  type AccessDecision,
+  type AccessDenialCode,
+  type AccessPrincipal,
+  type SettingState,
+} from './access-control.js';
 
 export {
   assertRouteManifest,
