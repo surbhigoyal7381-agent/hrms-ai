@@ -47,6 +47,22 @@ export {
 } from './settings.js';
 
 export {
+  buildConfidentialPanel,
+  type ConfidentialPanel,
+  type PanelInput,
+  type PanelStrings,
+} from './confidential-panel.js';
+
+export {
+  readAccessLogResponse,
+  readTenantPanelContext,
+  resolveAccessLogWindowDays,
+  ACCESS_LOG_DISPLAY_WINDOW_DAYS,
+  type AccessLogResponse,
+  type TenantPanelContext,
+} from './access-log-response.js';
+
+export {
   readAccessLog,
   ACCESS_LOG_PAGE_SIZE,
   type AccessLogEntry,

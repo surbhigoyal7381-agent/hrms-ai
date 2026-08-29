@@ -2270,3 +2270,359 @@ $ grep -n "guarded('/api/me/record'" apps/web/app/api/me/record/route.ts
 - That the audit write belongs inside the read transaction for this route. REQ-014 says so
   and I agree — but it means a slow audit insert makes the record view slow, and that is a
   trade nobody has measured under load.
+
+---
+
+# Slice 3e — who looked at my record, and the panel (added 2026-08-29)
+
+**Tier: L, continued.** Personal data, and the requirement most likely to be got wrong.
+
+## What Aisha can do after this ships
+
+She opens one screen and sees who opened her record, when, and why — *"Meera Nair, HR
+Business Partner — opened your record on 14 August 2026. Reason: annual pay review."* Above
+that list, every time, on everybody's screen, sits a short note saying that confidential
+casework is never listed in anyone's record. Rohan, who is the respondent in a grievance,
+sees the identical note. **Neither of them can tell which of them is which**, and that is the
+feature.
+
+## What I did NOT rebuild
+
+`packages/core/src/access-log.ts` is **untouched**. The grouping by actor/purpose/calendar
+day, the suppression filter living in the `access_log_visible` view, the `IS DISTINCT FROM`
+that keeps purpose-less entries, the keyset paging, the absence of any `COUNT(*)` — all of
+that shipped in slice 2 and is already tested. This slice is what a request assembles on top
+of it.
+
+Two new files, and the split is deliberate:
+
+| File | What it is |
+|---|---|
+| `confidential-panel.ts` | The panel. Pure, no database, **no person-shaped argument** |
+| `access-log-response.ts` | The assembler: window + panel + the existing read model |
+
+## RULE-010 — the panel, and why the type signature is the control
+
+The panel is shown to everyone, always, byte-identical whether or not anything is suppressed.
+A panel that appears only when it applies **announces the case by appearing**.
+
+The enforcement is not a comment asking people to be careful. It is the signature:
+
+```ts
+export interface PanelInput {
+  market: string | null;
+  dpoName: string | null;
+  dpoEmail: string | null;
+}
+export function buildConfidentialPanel(input: PanelInput): ConfidentialPanel
+```
+
+Three tenant-level values and nothing else. **No entry count, no `hasSuppressed`, no person
+id, no entries array.** A reviewer does not have to read the body to know the panel cannot
+differ between two employees of one organisation — there is no argument through which it
+could. The file has no database access for the same reason: a function that could query
+could query something about the caller.
+
+The assembler reinforces it by ordering: the panel is built **before** the entries are read,
+so `readAccessLog`'s result is not merely unused when the panel is constructed, it is *not in
+scope*. Making the panel conditional requires changing the function's shape, which is a diff
+a reviewer notices. (Mutation 1 below had to add a `SELECT count(*)` to do it.)
+
+**In the payload the panel is the first key**, before anything whose length varies with the
+person. Serialised in key order it occupies the same byte range on every response.
+
+**Fail closed here means RENDER**, which is the opposite direction from every other
+fail-closed rule in this feature, and it is worth saying out loud because the instinct on a
+missed lookup is to render nothing. An unrecognised market resolves to the default set. It
+never resolves to no panel.
+
+### The strings
+
+Copied verbatim from Q-02's table and marked `DRAFTED_NOT_LEGALLY_APPROVED` **in the payload
+itself**, so nobody downstream ships them believing counsel has seen them. I did not reword
+them and I have no view on the wording.
+
+There is a test that **parses `20-requirements.md` and asserts the four strings are
+character-for-character identical** to the table. It caught a real transcription error while
+I was writing it: I had typed typographic apostrophes (`anyone’s`) where the requirements use
+plain ASCII (`anyone's`). A panel whose wording has quietly drifted is not the artefact
+counsel signed off on.
+
+Every market resolves to the default today, because RULE-010 records India, EU and UK as
+"not confident — uses the default until counsel reviews it". The per-market map exists so
+adding a reviewed market is a content change, not a code change.
+
+## How the non-vacuity guard works, and why it is the point
+
+The comparison that matters is: **Rohan, who has suppressed entries, against Aisha, who has
+none.** Without a guard that comparison is worthless — two people who both have nothing
+suppressed produce identical panels trivially, and the suite goes green forever over a
+comparison of two empty states.
+
+So the guard runs first, as its own test, and it checks three things:
+
+```
+1. Rohan has  > 0 rows with purpose_code = 'case_handling'   [owner role, against the TABLE]
+2. Aisha has == 0 such rows                                   [owner role, against the TABLE]
+3. Rohan has == 0 such rows visible through access_log_visible [the read path]
+```
+
+**Checked through the owner role, against the table, bypassing `access_log_visible`** — the
+very view whose job is to hide those rows. Asserting through the read path would return zero
+by design and confirm nothing. That is the whole trick, and it is the third time this shape
+of vacuous assertion has been caught in this product.
+
+Point 3 matters too: without it the panel could be identical while the entries leaked, and
+the test would still pass.
+
+The fixture is a real one — Rohan has 2 ordinary reads and 2 suppressed case-handling reads
+by "Anita Rao, Case Investigator"; Aisha has 3 ordinary reads and nothing suppressed.
+
+Four properties are then asserted across them:
+
+| Property | Why it is separate |
+|---|---|
+| `JSON.stringify(panel)` byte-identical, same byte length, same key order | A field-by-field comparison silently skips a field somebody adds later |
+| The panel occupies the same payload position | RULE-010 fixes the position so its offset cannot vary with the entry count |
+| No suppressed entry, name or purpose reaches the entries; both bucket to `1-5` | The panel being identical is not enough if the list gives it away |
+| No grouped count is inflated by a suppressed read | RULE-006 + RULE-010's ordering trap: filter before grouping, never after |
+
+And one more, from RULE-010's own table: **a person with no entries at all still gets the
+panel.** Otherwise "no entries" and "nothing suppressed" would look different.
+
+## REQ-020 — the viewer who left, or was erased
+
+The endpoint reads `actor_display_name` and `actor_role_label`, captured **at the time of the
+read**, and never joins to a live employment row. Three tests, escalating:
+
+1. **Meera still named while employed** — the baseline.
+2. **Meera's employment exited** — the test actually exits her and re-reads. Nothing in the
+   read path joins to `employment` for the name, so exiting cannot change what the entry
+   says.
+3. **Meera erased** — `actor_id` set to NULL, `actor_display_name` pseudonymised to "Former
+   employee". The entry must still read as a **human** read, with her role intact, so the
+   sentence is *"Former employee, HR Business Partner — opened your record on 14 August 2026.
+   Reason: annual pay review."*
+
+That third one carries a guard of its own — it asserts through the owner role that a row is
+genuinely in the erased shape (NULL actor id, pseudonymised name, `actor_kind = 'human'`)
+before asserting anything about the output. And a **positive control**: the payroll job in
+the same page is still classified `system`, so "kind is human" is not satisfied by a function
+that returns `human` for everything.
+
+This is the assertion I care most about after the panel. In my own words from the slice-1
+design note: **telling Aisha no human read her record when one did is the most damaging false
+statement this screen can make.**
+
+A fourth case: a legacy row with no captured name renders as an **unnamed human read** with
+`purposeMissing` set, never as a system read (RULE-005), and it is still shown — the
+`IS DISTINCT FROM` in the view is what keeps purpose-less entries alive.
+
+## RULE-007 — the window the screen may honestly claim
+
+`min(display window, actual audit retention)`, with retention read from
+`data_classification` rather than hard-coded. That is the record of processing and the single
+source of truth for retention in this product, so a market that shortens audit retention
+shortens this window automatically instead of the screen quietly over-promising.
+
+The test uses an **independent oracle** — it queries `data_classification` separately rather
+than trusting the function's own answer — and asserts the boundary RULE-007 names by asking
+for a display window longer than retention.
+
+The response reports the window it actually applied. And a test asserts the serialised
+response contains no `total`, `totalCount` or `entryCount` field: REQ-019 says no total is
+ever computed or displayed, and a count field is the easiest thing in the world to add and
+the hardest to notice.
+
+## The endpoint
+
+`GET /api/me/access-log`, declared `auth: 'employee'`, `tenantSettingGated: true`,
+`postExit: false`, and enforced by the guard from slice 3d. It appeared in the boot manifest
+and in every property of the enumeration test automatically — no test was edited to include
+it, which is the property that walk exists for.
+
+```
+Route manifest OK — 6 route(s) checked:
+  /api/health                  auth=public   settingGated=false postExit=false
+  /api/me/access-log           auth=employee settingGated=true  postExit=false
+  /api/me/record               auth=employee settingGated=true  postExit=false
+  /signin/callback             auth=public   settingGated=false postExit=false
+  /signin/out                  auth=public   settingGated=false postExit=false
+  /signin/start                auth=public   settingGated=false postExit=false
+```
+
+**`tenantSettingGated: true`, unlike the export.** RULE-002 puts the access log in the gated
+experience column; only the export, the minimal own-fields view and the data-protection
+contact are carved out as statutory rights.
+
+**The panel is part of this response, not a separate fetch.** A panel fetched separately
+could arrive a moment later on some records, and a timing difference is a signal — REQ-031's
+argument applied to RULE-010.
+
+**The audit write is in the same transaction** (REQ-014). Reading your own access log is
+itself a sensitive read and appears in your own log next time. That is slightly recursive and
+it is the correct answer: an access log with a hole where its own reads should be is an
+access log that is lying by omission.
+
+**Two alerts, and neither changes a byte of the response**: `dpo.unconfigured` when the
+tenant has no published contact, and `access_log_purpose_missing` per entry with no purpose
+code. Both are operational problems that must reach somebody; if either altered the payload
+it would be a channel.
+
+## Failure matrix — the rows this slice adds
+
+| What fails | Detected how | Behaviour | What Aisha sees |
+|---|---|---|---|
+| The audit write fails | Exception inside the read transaction | Whole transaction rolls back; **no access-log data is returned** | The generic error; operations is paged |
+| The tenant has no data-protection contact | `dpoConfigured: false` | Panel **still rendered**, with the template intact; `dpo.unconfigured` alerts | The panel, with the contact line unresolved — never a missing panel |
+| An entry has no purpose code | `purposeMissing` | Entry **still shown**, with RULE-004's fallback; alert per entry | "Reason not recorded", and the entry is there |
+| The market is unrecognised | Map miss | **Default string set**, never no panel | The standard panel |
+| Audit retention is shorter than the display window | `limitedByRetention` | The window shrinks to what the data covers | A shorter, truthful period |
+
+## What is NOT built
+
+Out by instruction: the export and the download path, post-exit routing, REQ-031's timing
+defence, self-correction, session lifetime, any page rendering.
+
+Out by my judgement, and each is named rather than skipped:
+
+| Not built | Why | Consequence today |
+|---|---|---|
+| **The rendered screen** | No page rendering in this slice | RULE-010's byte-identity is proved on the **JSON payload**, which is what the endpoint returns. The DOM-level assertion — same markup, same ARIA labels, same position — cannot be written until the component exists, and it is REQ-007's literal wording. **This is the biggest gap in the slice and I want it stated plainly.** |
+| **`tenant_dpo_contact`** | Publishing the contact is REQ-013, a different slice | `dpoName`/`dpoEmail` are NULL for every tenant, so `{dpo_name}` and `{dpo_email}` stay unsubstituted and the alert fires. The panel renders regardless |
+| **Substituting the panel's parameters** | The strings are counsel's; inventing replacement wording for an unconfigured contact would be rewording them | The API returns templates plus a `params` object. The renderer substitutes |
+| **Timezone from the work calendar** | No work-calendar table exists | `timezone` is UTC. RULE-009's named zone is not met and is not claimed. Wrong for Aisha at 00:03 IST, who sees the previous calendar day |
+| **`access_log_viewed` and `access_log_scrolled_past_first_entry` events** | The first-party analytics writer is not wired to this path | REQ-005's and REQ-019's event criteria are unmet. Named, not silently skipped |
+| **The `case_suppression` pairing constraint** | RULE-014's table ships in migration 0003; the reconciliation check that alerts on a `case_handling` row with no suppression record does not exist | A suppressed entry with no suppression record would go unnoticed. It stays suppressed — it is not revealed by a data defect — but nobody is told |
+| **`Show more` focus management and the live region** | `A11Y-02`/`A11Y-05` are properties of the component | The cursor is in the payload; the behaviour is not built |
+| **An HTTP-level test of the endpoint** | Needs a running Next.js server and a seeded tenant | Proven at the read-model layer and structurally at the guard layer. The Test agent's |
+
+## Evidence — slice 3e
+
+```
+                 before (3d)               after (3e)
+packages/ai       17 passed (17)            17 passed (17)
+packages/core    137 passed (137)          155 passed (155)
+apps/web         124 passed (124)          124 passed (124)
+                 ---                       ---
+                 278                       296
+```
+
+`apps/web` is unchanged in count and that is expected: the new route is picked up by the
+existing enumeration, which asserts properties over whatever the walk finds rather than
+counting tests per route.
+
+---
+
+## Mutation testing
+
+Both chosen because the broken version looks entirely correct: the screen renders, the
+entries are right, and nothing in a log says anything is wrong.
+
+### Mutation 1 — the panel becomes conditional on something being suppressed
+
+This is the "helpful" version a reasonable engineer would write — why tell somebody nothing
+was hidden? Note that it could not be written without **adding a query**, which is the design
+working:
+
+```ts
+  const suppressed = await tx.query(
+    `SELECT count(*)::int AS n FROM audit_log
+      WHERE subject_person_id = $1 AND purpose_code = 'case_handling'`,
+    [query.subjectPersonId]);
+  const panel = (suppressed.rows[0]?.n ?? 0) > 0
+    ? buildConfidentialPanel({ ... })
+    : null as unknown as ConfidentialPanel;
+```
+
+**RED — 2 tests:**
+
+```
+× RULE-010 — the panel is identical whether or not anything is suppressed
+    > renders a byte-identical panel for Rohan and for Aisha
+× RULE-010 — the panel is identical whether or not anything is suppressed
+    > keeps the panel in the same position in the payload for both
+ Test Files  1 failed | 10 passed (11)
+      Tests  2 failed | 153 passed (155)
+```
+
+**The result worth reading carefully:** the *empty-state* test — "shows the panel to somebody
+with NO entries at all" — **still passed.** Both that person and Aisha have nothing
+suppressed, so both got `null`, and `null === null`. Only the Rohan-versus-Aisha comparison,
+the one with the guard in front of it, caught this. That is the vacuity trap demonstrated
+rather than described: a plausible-looking panel test that compares two unsuppressed people
+proves nothing.
+
+**GREEN after restoring: 155 passed (155).**
+
+### Mutation 2 — the erased viewer reads as a system read
+
+`access-log.ts`, inferring the actor kind from whether an actor id survived instead of
+reading the column recorded at write time:
+
+```ts
+      kind: (r.actor_id === null ? 'system' : 'human') as 'human' | 'system',
+```
+
+**RED — 3 tests across two files:**
+
+```
+× REQ-020 — the viewer has left, or been erased
+    > reads as "Former employee" with the role after erasure, NEVER as a system read
+× REQ-020 — the viewer has left, or been erased
+    > shows an unattributable entry as an unnamed HUMAN read
+× RULE-005 — a missing actor is never a system read
+    > an ERASED viewer still reads as a human, named "Former employee"
+ Test Files  2 failed | 9 passed (11)
+      Tests  3 failed | 152 passed (155)
+```
+
+The third failure is from slice 2's own suite, which I did not write in this slice and did
+not need to — the property was already guarded there, and the new tests agree with it from a
+different direction.
+
+**GREEN after restoring — full suite:**
+
+```
+packages/ai   Test Files  1 passed (1)    Tests  17 passed (17)
+packages/core Test Files 11 passed (11)   Tests 155 passed (155)
+apps/web      Test Files  8 passed (8)    Tests 124 passed (124)
+```
+
+Reverts confirmed in the source, not from memory:
+
+```
+$ grep -n "kind: r.actor_kind" packages/core/src/access-log.ts
+161:      kind: r.actor_kind as 'human' | 'system',
+$ grep -n "const panel = buildConfidentialPanel" packages/core/src/access-log-response.ts
+110:  const panel = buildConfidentialPanel({
+```
+
+**I have not signed this off.** That is the reviewer's.
+
+## Handoff to hrms-test-automation
+
+**The three places I would attack first:**
+
+1. **RULE-010's assertion is about MARKUP and I proved it on JSON.** REQ-007 says "the
+   rendered markup of the panel region is byte-identical … no attribute, count, ordering,
+   spacing or ARIA label differs". The component does not exist, so that test cannot be
+   written yet — and when it is, **it needs the same owner-role guard**, or it will compare
+   two identical empty states and pass forever.
+2. **My fixture is mine.** Rohan's suppressed rows are written by my own `seedRead` helper.
+   If the helper and the view disagree in the same direction they agree and prove nothing.
+   Independent oracle: write a `case_handling` row through the real audit writer once the
+   Cases module exists, and confirm the count through `psql` rather than through my helper.
+3. **The panel's byte-identity is asserted between two people in ONE tenant.** That is what
+   RULE-010 requires. Nobody has asserted it across tenants with different markets, and once
+   a market override lands, two tenants will legitimately differ — so the test must stay
+   scoped to one tenant or it will start failing for the wrong reason.
+
+**Assumptions of mine to challenge:**
+
+- That returning the strings as unsubstituted templates is right. It keeps me out of
+  counsel's wording, and it moves substitution to a renderer that does not exist yet.
+- That the panel being the first key in the payload is a meaningful position guarantee. It is
+  true of `JSON.stringify` over an object literal; it is not a guarantee any HTTP layer makes.
+- That UTC is an acceptable placeholder timezone. It is not, for anybody east of Greenwich
+  reading their log just after midnight.

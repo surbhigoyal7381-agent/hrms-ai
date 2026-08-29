@@ -385,3 +385,87 @@ It was caught because the test **seeds 30 rows and asserts a real second page**,
 asserting the page-size constant. A test written against the constant would have agreed with
 the bug. This is the same lesson as the vacuous-assertion sweep: assert the business fact,
 never the derivation the production code uses.
+
+### 2026-08-29 — Q-02 strings copied verbatim, and a transcription error caught by a test
+**By:** hrms-fullstack-engineer, slice 3e. **Not a request to reword anything.**
+
+The four `access.confidential_panel.*` strings are in code exactly as the requirements table
+has them, marked `DRAFTED_NOT_LEGALLY_APPROVED` **in the response payload itself** so nobody
+downstream ships them believing counsel has seen them. Q-02 stays open; it blocks release,
+not the build.
+
+**A test parses `20-requirements.md` and asserts the four strings are character-for-character
+identical to the table.** It earned its place immediately: I had transcribed typographic
+apostrophes (`anyone’s`) where the requirements use plain ASCII (`anyone's`). Invisible in
+review, and a panel whose wording has drifted from the approved text is precisely the artefact
+that gets signed off and then not shipped.
+
+**Recommendation to whoever owns the microcopy:** keep that test. When counsel signs off per
+market, the signed text goes in the requirements table and the test tells you if code disagrees.
+
+### 2026-08-29 — RULE-010 is proved on the PAYLOAD, not on the markup. That is a gap.
+**By:** hrms-fullstack-engineer, slice 3e. **Stated plainly because a reader could reasonably
+assume otherwise.**
+
+REQ-007's assertion is about rendered markup: *"the rendered markup of the panel region is
+byte-identical … no attribute, count, ordering, spacing or ARIA label differs"*. **No component
+exists**, so what I proved is that the JSON the endpoint returns is byte-identical between a
+person with suppressed entries and a person with none — same bytes, same length, same key
+order, same position in the payload.
+
+That is the strongest assertion available at this layer and it is **not** the requirement. The
+markup-level test is still owed, and when it is written it needs the same owner-role guard, or
+it will compare two identical empty states and pass forever.
+
+**Owner: whoever builds the access-log screen. Do not close REQ-007 on the strength of this
+slice.**
+
+### 2026-08-29 — The panel cannot see the person, and that is enforced by the type
+**By:** hrms-fullstack-engineer, slice 3e. **Recorded so a future refactor does not quietly
+undo it.**
+
+`buildConfidentialPanel` takes three tenant-level values — market, contact name, contact email
+— and nothing else. No entry count, no `hasSuppressed`, no person id, no entries array. The
+file has no database access.
+
+The consequence is that a reviewer can confirm from the signature alone that the panel cannot
+differ between two employees of one organisation. The assembler reinforces it by ordering: the
+panel is built before the entries are read, so the entries are not merely unused, they are not
+in scope.
+
+**Mutation-tested.** Making the panel conditional required ADDING a `SELECT count(*)` to the
+assembler — the design made the wrong thing awkward rather than merely discouraged. Two tests
+went red. **Notably the empty-state test did NOT**, because both people in it have nothing
+suppressed; only the guarded Rohan-versus-Aisha comparison caught it. That is the vacuity trap
+demonstrated rather than described.
+
+**If a later change adds any person-derived argument to `PanelInput`, that is a review
+blocker**, not a refactor.
+
+### 2026-08-29 — The access log's timezone is UTC, and RULE-009 is therefore not met
+**By:** hrms-fullstack-engineer, slice 3e. **A known gap, carried forward from slice 3d.**
+
+RULE-006 groups by the employee's calendar day and RULE-009 requires the displayed time in the
+employee's work-calendar zone with the zone named. **There is no work-calendar table in this
+product**, so the endpoint passes `'UTC'`.
+
+For Aisha in India reading her log at 00:03 IST, a read that happened at 23:58 the previous
+evening groups into the wrong calendar day and displays the wrong date. That is a visible
+defect for every employee east of Greenwich, not a rounding detail.
+
+The read model already takes the timezone as a parameter, so nothing is blocked — this is a
+missing lookup, not a missing design. **Owner: whoever adds the work calendar.**
+
+### 2026-08-29 — RULE-014's pairing check is not built, so a suppression with no record is silent
+**By:** hrms-fullstack-engineer, slice 3e. **Named rather than skipped.**
+
+REQ-007's last criterion: an entry with `purpose_code = 'case_handling'` and **no** matching
+suppression record is a defect, and it must be **alerted, not silently hidden**.
+
+Migration 0003 ships the `case_suppression` table. The reconciliation check that would fire
+the alert does not exist. So today a suppressed entry with no suppression record stays
+suppressed — which is the safe direction, the entry is not revealed by a data defect — but
+**nobody is told**, which is the half that is missing.
+
+No Cases module exists and nothing writes `case_handling` in production, so this is latent
+rather than live. It must not ship alongside the Cases module without the check.
